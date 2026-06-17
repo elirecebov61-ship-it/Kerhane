@@ -2,33 +2,17 @@
 """
 KERHANE EGLENCE BOT
 --------------------
-Tam funksiyali Telegram oyun botu.
+Tam fonksiyonlu Telegram oyun botu.
 Kitabxana: python-telegram-bot v20+ (async)
-Verilenler bazasi: PostgreSQL (psycopg2)
-Token: BOT_TOKEN environment variable-dan oxunur.
-DB elaqesi: DATABASE_URL environment variable-dan oxunur.
+Veritabanı: PostgreSQL (psycopg2)
+Token: BOT_TOKEN ortam değişkeninden okunur.
+DB bağlantısı: DATABASE_URL ortam değişkeninden okunur.
 
 Qurulus:
     pip install -r requirements.txt
-    export BOT_TOKEN="123456:ABC-..."           (Linux/Mac)
+    export BOT_TOKEN="123456:ABC-..."
     export DATABASE_URL="postgresql://user:pass@host:port/dbname"
     python bot.py
-
-Oyunlar:
-    1. Slot Makinesi
-    2. Bayrak Yarisi (10 tur, 15 saniye, 3 hak)
-    3. Tas Kagiz Makas (Bot ile / PvP Duello)
-    4. Yazi Tura
-    5. Bul Beni (Kutu) - 3x3
-    6. X0X Duello (PvP)
-    7. Sayi Tahmin (1-100, pot sistemi)
-    8. Bulmaca (Adam Asmaca - zorluk secimli)
-    9. Kelime Zinciri
-    10. Rus Ruleti
-    11. At Yarisi
-    12. Profilim + Saatlik Odul
-    13. En Zenginler (Leaderboard)
-    14. Para Transferi (/yolla - reply ile)
 """
 
 import asyncio
@@ -61,11 +45,14 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 
-START_BALANCE = 5999          # Yeni uzvun basliyici bakiyesi
-HOURLY_REWARD = 5000          # Saatlik odul mebedi
+START_BALANCE = 5999
+HOURLY_REWARD = 5000
 HOURLY_COOLDOWN_SECONDS = 60 * 60  # 1 saat
 
-ADMIN_CONTACT = "@korunan"    # Bakiye almaq ucun elaqe
+LEADERBOARD_REFRESH_SECONDS = 24 * 60 * 60  # 24 saat
+LEADERBOARD_SIZE = 15
+
+ADMIN_CONTACT = "@korunan"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -74,14 +61,122 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ----------------------------------------------------------------------
-# YADDASDAKI AKTIV OYUN VEZIYYETLERI
+# YADDASDA SAXLANAN AKTIV OYUN VEZIYYETLERI
 # ----------------------------------------------------------------------
 
-PENDING_GAMES = {}          # bayraq / x0x / tkm duello / rus ruleti gozleme ve s.
-WORD_CHAIN_STATE = {}        # chat_id -> kelime zinciri veziyyeti
-GUESS_NUMBER_STATE = {}      # chat_id -> sayi tahmin veziyyeti
-HANGMAN_STATE = {}           # chat_id -> bulmaca (adam asmaca) veziyyeti
-BAYRAK_TIMERS = {}           # f"bayrak_{user_id}" -> asyncio.Task (geri sayim)
+# Her bir deyer bir oyunun "state" obyektidir. Acari oyun tipine gore ferqlenir.
+PENDING_GAMES = {}        # umumi: bayraq, tkm duello, xox, vs -> key bele qurulur (asagida izah olunur)
+TEXT_GAME_STATE = {}      # chat_id -> {"type": "...", ...}  (bayraq, sayitahmin, kelime, bulmaca ucun)
+
+# ----------------------------------------------------------------------
+# SOZ / BAYRAQ / BULMACA BANKLARI
+# ----------------------------------------------------------------------
+
+# (bayraq_emoji, dogru_cavablar_listesi)  -- ilk cavab gosterilen, qalanlari alternativ qebul olunur
+FLAGS_BANK = [
+    ("🇹🇷", ["türkiye", "turkiye"]),
+    ("🇦🇿", ["azerbaycan", "azerbaycan"]),
+    ("🇩🇪", ["almanya"]),
+    ("🇫🇷", ["fransa"]),
+    ("🇧🇷", ["brezilya"]),
+    ("🇯🇵", ["japonya"]),
+    ("🇮🇹", ["italya"]),
+    ("🇪🇸", ["ispanya"]),
+    ("🇬🇧", ["ingiltere", "birlesik krallik"]),
+    ("🇺🇸", ["amerika", "abd"]),
+    ("🇷🇺", ["rusya"]),
+    ("🇨🇳", ["cin"]),
+    ("🇰🇷", ["güney kore", "guney kore"]),
+    ("🇮🇳", ["hindistan"]),
+    ("🇨🇦", ["kanada"]),
+    ("🇲🇽", ["meksika"]),
+    ("🇦🇷", ["arjantin"]),
+    ("🇳🇱", ["hollanda"]),
+    ("🇵🇹", ["portekiz"]),
+    ("🇬🇷", ["yunanistan"]),
+    ("🇨🇭", ["isvicre"]),
+    ("🇸🇪", ["isvec"]),
+    ("🇳🇴", ["norvec"]),
+    ("🇵🇱", ["polonya"]),
+    ("🇪🇬", ["misir"]),
+    ("🇸🇦", ["suudi arabistan"]),
+    ("🇮🇷", ["iran"]),
+    ("🇮🇶", ["irak"]),
+    ("🇺🇦", ["ukrayna"]),
+    ("🇶🇦", ["katar"]),
+    # bezi daha zor bayraqlar
+    ("🇰🇿", ["kazakistan"]),
+    ("🇲🇦", ["fas"]),
+    ("🇱🇧", ["lübnan", "lubnan"]),
+    ("🇻🇳", ["vietnam"]),
+    ("🇨🇱", ["sili"]),
+    ("🇨🇴", ["kolombiya"]),
+    ("🇫🇮", ["finlandiya"]),
+    ("🇮🇪", ["irlanda"]),
+    ("🇮🇩", ["endonezya"]),
+    ("🇳🇬", ["nijerya"]),
+]
+
+# Kelime zinciri ve bulmaca ucun ortaq turkce soz banki (100+ soz)
+WORD_BANK = [
+    "masa", "araba", "kapı", "kitap", "bardak", "kalem", "telefon", "bilgisayar",
+    "pencere", "duvar", "yatak", "yastık", "halı", "perde", "lamba", "saat",
+    "ayna", "dolap", "sandalye", "mutfak", "buzdolabı", "fırın", "tencere",
+    "tabak", "çatal", "kaşık", "bıçak", "peçete", "ekmek", "peynir", "zeytin",
+    "domates", "salatalık", "biber", "patates", "soğan", "sarımsak", "limon",
+    "elma", "armut", "muz", "çilek", "karpuz", "kavun", "üzüm", "şeftali",
+    "kiraz", "vişne", "ayva", "nar", "incir", "ceviz", "fındık", "badem",
+    "fıstık", "deniz", "dağ", "orman", "nehir", "göl", "çöl", "ada", "vadi",
+    "tepe", "ova", "bulut", "yağmur", "kar", "rüzgar", "fırtına", "gökyüzü",
+    "güneş", "yıldız", "gezegen", "uzay", "dünya", "ülke", "şehir", "köy",
+    "sokak", "cadde", "meydan", "park", "bahçe", "okul", "üniversite",
+    "hastane", "market", "restoran", "otel", "havalimanı", "istasyon",
+    "köprü", "tünel", "fabrika", "ofis", "kütüphane", "müze", "sinema",
+    "tiyatro", "stadyum", "kale", "saray", "cami", "kilise", "tapınak",
+    "ağaç", "çiçek", "yaprak", "kök", "dal", "tohum", "meyve", "sebze",
+    "köpek", "kedi", "kuş", "balık", "aslan", "kaplan", "fil", "zürafa",
+    "maymun", "ayı", "kurt", "tilki", "tavşan", "sincap", "kartal", "baykuş",
+    "yılan", "kaplumbağa", "timsah", "yunus", "balina", "köpekbalığı",
+    "arı", "kelebek", "karınca", "örümcek", "böcek", "sinek", "uçurtma",
+    "balon", "top", "oyuncak", "bisiklet", "motosiklet", "tren", "gemi",
+    "uçak", "helikopter", "roket", "anahtar", "kilit", "çanta", "valiz",
+    "şemsiye", "gözlük", "saat", "yüzük", "kolye", "bilezik", "ayakkabı",
+    "çorap", "gömlek", "pantolon", "ceket", "şapka", "eldiven", "kemer",
+]
+
+
+def normalize(text: str) -> str:
+    """Türkçe karakterleri sadeleştirip küçük harfe çevirir, karşılaştırma için."""
+    text = text.strip().lower()
+    repl = {
+        "ı": "i", "İ": "i", "ş": "s", "ğ": "g",
+        "ü": "u", "ö": "o", "ç": "c", "â": "a",
+    }
+    for k, v in repl.items():
+        text = text.replace(k, v)
+    return text
+
+
+def pick_word(min_len=3, max_len=99):
+    candidates = [w for w in WORD_BANK if min_len <= len(w) <= max_len]
+    return random.choice(candidates) if candidates else random.choice(WORD_BANK)
+
+
+def find_word_for_letter(letter: str, used: set):
+    letter_n = normalize(letter)
+    candidates = [
+        w for w in WORD_BANK
+        if normalize(w[0]) == letter_n and w not in used
+    ]
+    return random.choice(candidates) if candidates else None
+
+
+HANGMAN_DIFFICULTY = {
+    "kolay": (3, 4),
+    "orta": (5, 6),
+    "zor": (7, 12),
+}
+
 
 # ----------------------------------------------------------------------
 # VERILENLER BAZASI (PostgreSQL)
@@ -95,8 +190,8 @@ def get_pool():
     if _connection_pool is None:
         if not DATABASE_URL:
             raise RuntimeError(
-                "❌ DATABASE_URL tapilmadi! Railway-de PostgreSQL elave et, "
-                "ya da export DATABASE_URL='postgresql://...' ile elaqeni ver."
+                "❌ DATABASE_URL bulunamadı! Railway'de PostgreSQL ekle, "
+                "ya da export DATABASE_URL='postgresql://...' ile bağlantıyı ver."
             )
         _connection_pool = pg_pool.SimpleConnectionPool(1, 10, DATABASE_URL)
     return _connection_pool
@@ -125,6 +220,20 @@ def init_db():
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS leaderboard_meta (
+                id INTEGER PRIMARY KEY DEFAULT 1,
+                last_reset_ts BIGINT DEFAULT 0
+            )
+            """
+        )
+        cur.execute("SELECT id FROM leaderboard_meta WHERE id=1")
+        if cur.fetchone() is None:
+            cur.execute(
+                "INSERT INTO leaderboard_meta (id, last_reset_ts) VALUES (1, %s)",
+                (int(time.time()),),
+            )
         conn.commit()
     finally:
         db_release(conn)
@@ -164,7 +273,6 @@ def get_balance(user_id: int) -> int:
 
 
 def change_balance(user_id: int, amount: int) -> int:
-    """Bakiyeye amount elave edir (menfi ede biler). Yeni balansi qaytarir."""
     conn = db_connect()
     try:
         cur = conn.cursor()
@@ -200,26 +308,57 @@ def set_last_reward_ts(user_id: int, ts: int):
         db_release(conn)
 
 
-def get_user_row(user_id: int):
+def get_top_users(limit: int = LEADERBOARD_SIZE):
     conn = db_connect()
     try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute("SELECT * FROM users WHERE user_id=%s", (user_id,))
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT first_name, balance FROM users ORDER BY balance DESC LIMIT %s",
+            (limit,),
+        )
+        return cur.fetchall()
+    finally:
+        db_release(conn)
+
+
+def get_leaderboard_reset_info():
+    """(last_reset_ts) döndürür; gerekirse sıfırlar ve yeni ts döndürür."""
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT last_reset_ts FROM leaderboard_meta WHERE id=1")
+        row = cur.fetchone()
+        last_ts = row[0] if row else 0
+        now = int(time.time())
+        if now - last_ts >= LEADERBOARD_REFRESH_SECONDS:
+            cur.execute("UPDATE leaderboard_meta SET last_reset_ts=%s WHERE id=1", (now,))
+            conn.commit()
+            return now
+        return last_ts
+    finally:
+        db_release(conn)
+
+
+def find_user_by_username(username: str):
+    """@ işareti olmadan, sade username ile arar."""
+    conn = db_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT user_id, first_name, balance FROM users WHERE LOWER(username)=LOWER(%s)",
+            (username,),
+        )
         return cur.fetchone()
     finally:
         db_release(conn)
 
 
-def get_top_users(limit: int = 15):
+def get_user_by_id(user_id: int):
     conn = db_connect()
     try:
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            "SELECT user_id, first_name, username, balance FROM users "
-            "ORDER BY balance DESC LIMIT %s",
-            (limit,),
-        )
-        return cur.fetchall()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, first_name, balance FROM users WHERE user_id=%s", (user_id,))
+        return cur.fetchone()
     finally:
         db_release(conn)
 
@@ -236,20 +375,8 @@ async def reply(update: Update, text: str, **kwargs):
     return await update.effective_message.reply_text(text, **kwargs)
 
 
-def parse_bet(args, default=100):
-    """Komanda arqumentlerinden bahis mebedini oxuyur."""
-    if args:
-        try:
-            v = int(args[0])
-            if v > 0:
-                return v
-        except (ValueError, IndexError):
-            pass
-    return default
-
-
-def parse_bet_strict(args):
-    """Bahis mebedini oxuyur, yoxdursa None qaytarir (format xebardarligi ucun)."""
+def parse_amount_arg(args):
+    """/komut [miktar] formatından bahis miktarını okur. Yoksa None döndürür."""
     if not args:
         return None
     try:
@@ -261,26 +388,31 @@ def parse_bet_strict(args):
     return None
 
 
-async def check_and_take_bet(update: Update, user_id: int, bet: int) -> bool:
-    """Bakiye kifayet edirse bahisi cixir, true qaytarir. Yoxdursa xeberdarliq edib false qaytarir."""
+async def require_amount(update: Update, args, usage_text: str):
+    """Miktar yok/yanlışsa kullanım mesajı gösterir, None döndürür."""
+    amount = parse_amount_arg(args)
+    if amount is None:
+        await reply(update, usage_text, parse_mode=ParseMode.MARKDOWN)
+        return None
+    return amount
+
+
+async def take_bet_or_warn(update: Update, user_id: int, bet: int) -> bool:
     bal = get_balance(user_id)
     if bal < bet:
-        await reply(
-            update,
-            f"❌ Bakiyən kifayət etmir!\n💳 Bakiyən: {fmt(bal)} TL, bahis: {fmt(bet)} TL.",
-        )
+        await reply(update, f"❌ Bakiyen yetersiz!\n💳 Bakiyen: {fmt(bal)} TL, bahis: {fmt(bet)} TL.")
         return False
     change_balance(user_id, -bet)
     return True
 
 
-async def safe_edit(query, text, reply_markup=None, parse_mode=None):
-    """edit_message_text cagirir, 'message is not modified' xetasini sessiz keçir."""
+async def safe_edit(query, text, **kwargs):
     try:
-        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        await query.edit_message_text(text, **kwargs)
     except BadRequest as e:
-        if "not modified" not in str(e).lower():
-            raise
+        if "Message is not modified" not in str(e):
+            logger.warning(f"edit_message_text failed: {e}")
+
 
 # ----------------------------------------------------------------------
 # /start VE /menu
@@ -290,7 +422,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
     text = (
-        f"👋 Salam {user.first_name}! Kerhane Eğlence Botuna Hoş Geldin!\n"
+        f"👋 Selam {user.first_name}! kerhane eğlence botuna Hoş Geldin!\n"
         f"🎮 Eğlenirken bakiye kazanabileceğin oyunlar burada seni bekliyor.\n\n"
         f"👉 Oyunların listesini görmek ve başlamak için lütfen /menu yaz!"
     )
@@ -300,26 +432,30 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_menu_keyboard():
     buttons = [
         [
-            InlineKeyboardButton("🎰 Slot", callback_data="info_slot"),
-            InlineKeyboardButton("🚩 Bayrak", callback_data="info_bayrak"),
-            InlineKeyboardButton("✂️ Taş Kağıt Makas", callback_data="info_tkm"),
+            InlineKeyboardButton("🎰 Slot Makinesi", callback_data="info_slot"),
+            InlineKeyboardButton("🚩 Bayrak Yarışı", callback_data="info_bayrak"),
         ],
         [
+            InlineKeyboardButton("✂️ Taş Kağıt Makas", callback_data="info_tkm"),
             InlineKeyboardButton("🪙 Yazı Tura", callback_data="info_yazitura"),
-            InlineKeyboardButton("🔍 Bul Beni", callback_data="info_kutu"),
-            InlineKeyboardButton("⚔️ XOX Düello", callback_data="info_x0x"),
+        ],
+        [
+            InlineKeyboardButton("🔍 Bul Beni (Kutu)", callback_data="info_kutu"),
+            InlineKeyboardButton("❌ X0X Duello", callback_data="info_xox"),
         ],
         [
             InlineKeyboardButton("🔢 Sayı Tahmin", callback_data="info_sayitahmin"),
-            InlineKeyboardButton("🧩 Bulmaca", callback_data="info_bulmaca"),
-            InlineKeyboardButton("📝 Kelime Zinciri", callback_data="info_kelime"),
+            InlineKeyboardButton("🧩 Boşluk Doldurma", callback_data="info_bulmaca"),
         ],
         [
+            InlineKeyboardButton("📝 Kelime Zincir", callback_data="info_kelime"),
             InlineKeyboardButton("🔫 Rus Ruleti", callback_data="info_rusruleti"),
-            InlineKeyboardButton("🐎 At Yarışı", callback_data="info_atyarisi"),
         ],
         [
+            InlineKeyboardButton("🐎 At Yarışı", callback_data="info_atyarisi"),
             InlineKeyboardButton("👤 Profilim", callback_data="info_profil"),
+        ],
+        [
             InlineKeyboardButton("🏆 En Zenginler", callback_data="info_zenginler"),
             InlineKeyboardButton("💸 Para Transferi", callback_data="info_transfer"),
         ],
@@ -331,69 +467,27 @@ async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
     text = (
-        "🎰 KERHANE EĞLENCE BOT - OYUN PANELİ\n"
+        "🎰 KERHANE EGLENCE BOT - OYUN PANELİ\n"
         "Eğlenceli oyunlar, keyifli vakit. Aşağıdaki butonlardan oyunların "
-        "komutlarını öğrenebilirsin.\n\n"
-        f"⚠️ Bakiye almak için {ADMIN_CONTACT} ile iletişime geçin."
+        "komutlarını öğrenebilir, /ben yazıp bakiyenizi görebilirsiniz. "
+        "(Veya profilim butonuna basın)\n\n"
+        f"⚠️bakiye almak için {ADMIN_CONTACT} ile iletişime geçin."
     )
     await reply(update, text, reply_markup=build_menu_keyboard())
 
 
 GAME_INFO_TEXT = {
-    "info_slot": (
-        "🎰 Slot oynamak için lütfen şu formatta yazın:\n`/slot [miktar]`\n"
-        "Örnek: `/slot 100`"
-    ),
-    "info_bayrak": (
-        "🚩 Bayrak yarışı oynamak için lütfen şu formatta yazın:\n`/bayrak [miktar]`\n"
-        "Örnek: `/bayrak 150`"
-    ),
-    "info_tkm": (
-        "✂️ Taş Kağıt Makas oynamak için lütfen şu formatta yazın:\n`/tkm [miktar]`\n"
-        "Örnek: `/tkm 200`"
-    ),
-    "info_yazitura": (
-        "🪙 Yazı-Tura oynamak için lütfen şu formatta yazın:\n`/ytsans [miktar]`\n"
-        "Örnek: `/ytsans 100`"
-    ),
-    "info_kutu": (
-        "🔍 Bul beni kutu oyunu için lütfen şu formatta yazın:\n`/bulbeni [miktar]`\n"
-        "Örnek: `/bulbeni 300`"
-    ),
-    "info_x0x": (
-        "❌ XOX düellosu başlatmak için lütfen şu formatta yazın:\n`/xox [miktar]`\n"
-        "Örnek: `/xox 500`"
-    ),
-    "info_sayitahmin": (
-        "🔢 Sayı tahmin oyunu için lütfen şu formatta yazın:\n`/tahminet [miktar]`\n"
-        "Örnek: `/tahminet 50`"
-    ),
-    "info_bulmaca": (
-        "🧩 Adam asmaca oyunu için lütfen şu formatta yazın:\n`/bulmaca [miktar]`\n"
-        "Örnek: `/bulmaca 100`"
-    ),
-    "info_kelime": (
-        "📝 Kelime zinciri oyunu için lütfen şu formatta yazın:\n`/kelime [miktar]`\n"
-        "Örnek: `/kelime 100`"
-    ),
-    "info_rusruleti": (
-        "🔫 Rus ruleti oynamak için lütfen şu formatta yazın:\n`/ruleti [miktar]`\n"
-        "Örnek: `/ruleti 100`"
-    ),
-    "info_atyarisi": (
-        "🐎 At yarışı oynamak için lütfen şu formatta yazın:\n`/atyarisi [miktar]`\n"
-        "Örnek: `/atyarisi 100`"
-    ),
-    "info_profil": None,       # ayrıca handle olunur
-    "info_zenginler": None,    # ayrıca handle olunur
-    "info_transfer": (
-        "💸 Para Transferi Nasıl Yapılır?\n\n"
-        "Başka bir kullanıcıya bakiye göndermek için şu adımları izleyin:\n\n"
-        "1️⃣ Para göndermek istediğiniz kişinin bir mesajını yanıtlayın (Reply).\n"
-        "2️⃣ Yanıt olarak şu komutu yazıp gönderin:\n`/yolla [miktar]`\n\n"
-        "💡 Örnek: Birinin mesajını yanıtlayarak `/yolla 500` yazarsanız, "
-        "o kişiye 500 TL gönderilir."
-    ),
+    "info_slot": "🎰 Slot oynamak için lütfen şu formatta yazın:\n`/slot [miktar]`\nÖrnek: `/slot 100`",
+    "info_bayrak": "🚩 Bayrak yarışı oynamak için lütfen şu formatta yazın:\n`/bayrak [miktar]`\nÖrnek: `/bayrak 150`",
+    "info_tkm": "✂️ Taş Kağıt Makas oynamak için lütfen şu formatta yazın:\n`/tkm [miktar]`\nÖrnek: `/tkm 200`",
+    "info_yazitura": "🪙 Yazı-Tura oynamak için lütfen şu formatta yazın:\n`/ytsans [miktar]`\nÖrnek: `/ytsans 100`",
+    "info_kutu": "🔍 Bul beni kutu oyunu için lütfen şu formatta yazın:\n`/bulbeni [miktar]`\nÖrnek: `/bulbeni 300`",
+    "info_xox": "❌ XOX düellosu başlatmak için lütfen şu formatta yazın:\n`/xox [miktar]`\nÖrnek: `/xox 500`",
+    "info_sayitahmin": "🔢 Sayı tahmin oyunu için lütfen şu formatta yazın:\n`/tahminet [miktar]`\nÖrnek: `/tahminet 50`",
+    "info_bulmaca": "🧩 Adam asmaca oyunu için lütfen şu formatta yazın:\n`/bulmaca [miktar]`\nÖrnek: `/bulmaca 100`",
+    "info_kelime": "📝 Kelime zinciri oyunu için lütfen şu formatta yazın:\n`/kelime [miktar]`\nÖrnek: `/kelime 100`",
+    "info_rusruleti": "🔫 Rus ruleti oynamak için lütfen şu formatta yazın:\n`/rusruleti [miktar]`\nÖrnek: `/rusruleti 100`",
+    "info_atyarisi": "🐎 At yarışı oynamak için lütfen şu formatta yazın:\n`/atyarisi [miktar]`\nÖrnek: `/atyarisi 100`",
 }
 
 
@@ -402,57 +496,57 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     await query.answer()
 
-    # Menu duymesine basilanda menyu silinir, hemin oyuna aid mesaj gelir
     if data == "info_profil":
-        await query.message.delete()
-        await send_profile(update, context)
+        await send_profile_panel(update, context, via_callback=True)
         return
-
     if data == "info_zenginler":
-        await query.message.delete()
-        await send_leaderboard(update, context)
+        await send_leaderboard(update, context, via_callback=True)
+        return
+    if data == "info_transfer":
+        await send_transfer_info(update, context, via_callback=True)
         return
 
     text = GAME_INFO_TEXT.get(data)
     if text:
-        await query.message.delete()
-        await query.message.chat.send_message(text, parse_mode=ParseMode.MARKDOWN)
+        await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 # ----------------------------------------------------------------------
-# PROFIL VE SAATLIK ODUL
+# PROFIL / SAATLIK ODUL / ZENGINLER / TRANSFER
 # ----------------------------------------------------------------------
 
-async def send_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def build_profile_keyboard():
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎁 Saatlik Ödül", callback_data="profil_odul")]]
+    )
+
+
+async def send_profile_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
     bal = get_balance(user.id)
-
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🎁 Saatlik Ödül", callback_data="odul_panel")]]
-    )
-    text = (
-        "👤 PROFİL\n"
-        f"📛 İsim: {user.first_name}\n"
-        f"💳 Bakiye: {fmt(bal)} TL"
-    )
-    await update.effective_chat.send_message(text, reply_markup=keyboard)
+    text = f"👤 PROFİL\n📛 İsim: {user.first_name}\n💳 Bakiye: {fmt(bal)} TL"
+    kb = build_profile_keyboard()
+    if via_callback:
+        await update.callback_query.message.edit_text(text, reply_markup=kb)
+    else:
+        await reply(update, text, reply_markup=kb)
 
 
 async def ben_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_profile(update, context)
+    await send_profile_panel(update, context)
 
 
-async def odul_panel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def profil_odul_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     text = (
         "🎁 Saatlik Ödül Paneli\n"
         "Ödülünüzü buradan butonla alamazsınız.\n"
-        f"💰 Saatlik bedava {fmt(HOURLY_REWARD)} TL bakiyenizi talep etmek için "
-        "sohbete lütfen şu komutu yazın:\n\n/odulum"
+        "💰 Saatlik bedava 5000 TL bakiyenizi talep etmek için sohbete lütfen şu komutu yazın:\n\n"
+        "`/odulum`"
     )
-    await query.message.reply_text(text)
+    await query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def odulum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -478,136 +572,140 @@ async def odulum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ----------------------------------------------------------------------
-# EN ZENGINLER (LEADERBOARD)
-# ----------------------------------------------------------------------
-
-def _leaderboard_time_left():
-    """Saat ve dakika olaraq qalan vaxti dekorativ hesablar (gunun sonuna qeder)."""
-    now = datetime.now()
-    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    remaining = tomorrow - now
-    total_minutes = int(remaining.total_seconds() // 60)
-    hours = total_minutes // 60
-    minutes = total_minutes % 60
-    return hours, minutes
+def _format_remaining(seconds: int) -> str:
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    return f"{h}s {m}dk"
 
 
-async def send_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    top = get_top_users(limit=15)
-    hours, minutes = _leaderboard_time_left()
+async def build_leaderboard_text() -> str:
+    last_reset = get_leaderboard_reset_info()
+    remaining = LEADERBOARD_REFRESH_SECONDS - (int(time.time()) - last_reset)
+    if remaining < 0:
+        remaining = 0
 
+    rows = get_top_users(LEADERBOARD_SIZE)
     lines = [
-        f"🏆 GÜNLÜK EN ZENGİN {len(top)}",
-        f"⏳ Yenilenmeye Kalan: {hours}s {minutes}dk",
+        f"🏆 GÜNLÜK EN ZENGİN {LEADERBOARD_SIZE}",
+        f"⏳ Yenilenmeye Kalan: {_format_remaining(remaining)}",
         "",
     ]
-    for i, row in enumerate(top, start=1):
-        name = row["first_name"] or row["username"] or "Oyuncu"
-        lines.append(f"{i}. {name} -")
-        lines.append(f"`{fmt(row['balance'])} TL`")
-        lines.append("")
+    for i, row in enumerate(rows, start=1):
+        name, balance = row[0], row[1]
+        lines.append(f"{i}. {name} -\n```\n{fmt(balance)} TL\n```")
+    return "\n".join(lines)
 
-    text = "\n".join(lines).strip()
-    await update.effective_chat.send_message(text, parse_mode=ParseMode.MARKDOWN)
+
+async def send_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    text = await build_leaderboard_text()
+    if via_callback:
+        await update.callback_query.message.edit_text(text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await reply(update, text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def zenginler_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_leaderboard(update, context)
 
 
-# ----------------------------------------------------------------------
-# PARA TRANSFERI (/yolla - reply ile)
-# ----------------------------------------------------------------------
+TRANSFER_INFO_TEXT = (
+    "💸 Para Transferi Nasıl Yapılır?\n"
+    "Başka bir kullanıcıya bakiye göndermek için şu adımları izleyin:\n\n"
+    "1️⃣ Para göndermek istediğiniz kişinin bir mesajını yanıtlayın (Reply).\n"
+    "2️⃣ Yanıt olarak şu komutu yazıp gönderin:\n\n"
+    "`/yolla [miktar]`\n\n"
+    "💡 Örnek: Birinin mesajını yanıtlayarak `/yolla 500` yazarsanız, o kişiye 500 TL gönderilir."
+)
+
+
+async def send_transfer_info(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback=False):
+    if via_callback:
+        await update.callback_query.message.edit_text(TRANSFER_INFO_TEXT, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await reply(update, TRANSFER_INFO_TEXT, parse_mode=ParseMode.MARKDOWN)
+
 
 async def yolla_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
 
-    msg = update.effective_message
-    if not msg.reply_to_message:
+    replied = update.effective_message.reply_to_message
+    if not replied:
         await reply(update, "❌ Yanıtlayarak yaz!")
         return
 
-    amount = parse_bet_strict(context.args)
+    amount = parse_amount_arg(context.args)
     if amount is None:
-        await reply(update, "❌ Yanıtlayarak yaz!")
+        await send_transfer_info(update, context)
         return
 
-    target_user = msg.reply_to_message.from_user
+    target_user = replied.from_user
     ensure_user(target_user.id, target_user.first_name or "Oyuncu", target_user.username or "")
 
     bal = get_balance(user.id)
     if bal < amount:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
     change_balance(user.id, -amount)
     change_balance(target_user.id, amount)
 
-    sender_name = user.first_name or "Oyuncu"
-    target_name = target_user.first_name or "Oyuncu"
+    await reply(update, f"💸 {user.first_name} -> {target_user.first_name}: {fmt(amount)} TL gönderildi!")
 
-    if target_user.id == user.id:
-        await reply(update, f"💸 {sender_name} -> {sender_name}: {fmt(amount)} TL gönderildi!")
-    else:
-        await reply(update, f"💸 {sender_name} -> {target_name}: {fmt(amount)} TL gönderildi!")
 
 # ----------------------------------------------------------------------
-# 1) SLOT MAKINESI (animasiyali)
+# 1) SLOT MAKINESI
 # ----------------------------------------------------------------------
 
-SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "🍎", "💎", "🎰", "⏳"]
+SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "⭐", "💎", "🍎"]
 SLOT_MULTIPLIERS = {
     "💎💎💎": 10,
-    "🎰🎰🎰": 8,
+    "⭐⭐⭐": 7,
     "🔔🔔🔔": 5,
     "🍇🍇🍇": 4,
-    "🍎🍎🍎": 3,
-    "🍋🍋🍋": 2.5,
+    "🍋🍋🍋": 3,
     "🍒🍒🍒": 2,
+    "🍎🍎🍎": 2,
 }
+
+SLOT_USAGE = "🎰 Slot oynamak için lütfen şu formatta yazın:\n`/slot [miktar]`\nÖrnek: `/slot 100`"
 
 
 async def slot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, SLOT_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🎰 Slot oynamak için lütfen şu formatta yazın:\n`/slot [miktar]`\n"
-            "Örnek: `/slot 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        return
+    if not await take_bet_or_warn(update, user.id, bet):
         return
 
-    if not await check_and_take_bet(update, user.id, bet):
-        return
+    spinning = ["⏳", "🔄", "🎲"]
+    msg = await reply(update, f"🎰 SLOT DÖNÜYOR...\n[ {spinning[0]} | {spinning[1]} | {spinning[2]} ]")
 
-    msg = await reply(update, "🎰 SLOT DÖNÜYOR...\n[ ⏳ | ⏳ | ⏳ ]")
+    final_reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
 
-    # Animasiya: bir nece "firlanma" kadri
-    for _ in range(3):
+    # animasiya: hər addımda biraz daha az dəyişən simvol göstər
+    frames = [
+        [random.choice(SLOT_SYMBOLS), random.choice(SLOT_SYMBOLS), random.choice(SLOT_SYMBOLS)],
+        [final_reels[0], random.choice(SLOT_SYMBOLS), random.choice(SLOT_SYMBOLS)],
+        [final_reels[0], final_reels[1], random.choice(SLOT_SYMBOLS)],
+    ]
+    for frame in frames:
         await asyncio.sleep(0.5)
-        spin = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
         try:
-            await msg.edit_text(f"🎰 SLOT DÖNÜYOR...\n[ {spin[0]} | {spin[1]} | {spin[2]} ]")
+            await msg.edit_text(f"🎰 SLOT DÖNÜYOR...\n[ {frame[0]} | {frame[1]} | {frame[2]} ]")
         except BadRequest:
             pass
 
     await asyncio.sleep(0.5)
-
-    reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
-    combo = "".join(reels)
-    display = " | ".join(reels)
+    combo = "".join(final_reels)
+    display = " | ".join(final_reels)
 
     multiplier = SLOT_MULTIPLIERS.get(combo, 0)
-    if multiplier == 0 and reels[0] == reels[1] == reels[2]:
-        multiplier = 2  # diger ucluk uyğunlasmalari ucun tehlukesizlik
-    if multiplier == 0 and len(set(reels)) == 2:
-        multiplier = 0.5  # 2 eyni simvol ucun kicik mukafat
+    if multiplier == 0 and len(set(final_reels)) == 2:
+        multiplier = 0.5
 
     win = int(bet * multiplier)
 
@@ -627,212 +725,146 @@ async def slot_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await msg.edit_text(text)
     except BadRequest:
-        await update.effective_chat.send_message(text)
+        await reply(update, text)
+
 
 # ----------------------------------------------------------------------
-# 2) BAYRAK YARISI (10 tur, 3 hak, 15 saniye canli sayim)
+# 2) BAYRAK YARISI (mesaj-bazli, 10 tur, 15 saniye sure, 3 can)
 # ----------------------------------------------------------------------
 
-# 30 bayraq -> (emoji, dogru cevab). Bezileri "zor" (az taninan) olaraq qarisdirilib.
-FLAG_POOL = [
-    ("🇹🇷", "Türkiye"), ("🇦🇿", "Azerbaycan"), ("🇩🇪", "Almanya"), ("🇫🇷", "Fransa"),
-    ("🇧🇷", "Brezilya"), ("🇯🇵", "Japonya"), ("🇮🇹", "İtalya"), ("🇪🇸", "İspanya"),
-    ("🇬🇧", "İngiltere"), ("🇺🇸", "Amerika"), ("🇷🇺", "Rusya"), ("🇨🇳", "Çin"),
-    ("🇰🇷", "Güney Kore"), ("🇮🇳", "Hindistan"), ("🇨🇦", "Kanada"), ("🇲🇽", "Meksika"),
-    ("🇳🇱", "Hollanda"), ("🇸🇪", "İsveç"), ("🇳🇴", "Norveç"), ("🇵🇹", "Portekiz"),
-    ("🇬🇷", "Yunanistan"), ("🇪🇬", "Mısır"), ("🇸🇦", "Suudi Arabistan"), ("🇦🇷", "Arjantin"),
-    # zor bayraqlar
-    ("🇲🇳", "Moğolistan"), ("🇰🇿", "Kazakistan"), ("🇱🇻", "Letonya"), ("🇪🇪", "Estonya"),
-    ("🇧🇾", "Belarus"), ("🇺🇾", "Uruguay"),
-]
-
+BAYRAK_USAGE = "🚩 Bayrak yarışı oynamak için lütfen şu formatta yazın:\n`/bayrak [miktar]`\nÖrnek: `/bayrak 150`"
 BAYRAK_ROUNDS = 10
 BAYRAK_LIVES = 3
-BAYRAK_TIME = 15
-
-
-def build_bayrak_round():
-    correct = random.choice(FLAG_POOL)
-    others = random.sample([f for f in FLAG_POOL if f != correct], 3)
-    options = others + [correct]
-    random.shuffle(options)
-    return correct, options
+BAYRAK_TIMEOUT = 15
 
 
 async def bayrak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, BAYRAK_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🚩 Bayrak yarışı oynamak için lütfen şu formatta yazın:\n`/bayrak [miktar]`\n"
-            "Örnek: `/bayrak 150`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        return
+    if not await take_bet_or_warn(update, user.id, bet):
         return
 
-    if not await check_and_take_bet(update, user.id, bet):
-        return
+    chat_id = update.effective_chat.id
+    flag, answers = random.choice(FLAGS_BANK)
 
-    key = f"bayrak_{user.id}"
-    correct, options = build_bayrak_round()
-    PENDING_GAMES[key] = {
+    state = {
+        "type": "bayrak",
         "user_id": user.id,
         "bet": bet,
         "round": 1,
         "lives": BAYRAK_LIVES,
-        "correct": correct,
-        "options": options,
-        "chat_id": update.effective_chat.id,
-        "message_id": None,
+        "flag": flag,
+        "answers": answers,
+        "task": None,
     }
+    TEXT_GAME_STATE[chat_id] = state
 
-    msg = await _bayrak_send_round(update.effective_chat, key)
-    PENDING_GAMES[key]["message_id"] = msg.message_id
-    _bayrak_start_timer(context, key)
-
-
-def _bayrak_keyboard(options, key):
-    row = [
-        InlineKeyboardButton(emoji, callback_data=f"bayrak_pick_{key}_{i}")
-        for i, (emoji, _name) in enumerate(options)
-    ]
-    return InlineKeyboardMarkup([row])
+    await send_bayrak_round(update.effective_chat.id, context, first=True)
 
 
-async def _bayrak_send_round(chat, key):
-    game = PENDING_GAMES[key]
-    text = (
-        f"🚩 Hangi ülkenin bayrağı bu?\n\n"
-        f"🚩 TUR: {game['round']}/{BAYRAK_ROUNDS} | ❤️: {game['lives']}\n"
-        f"⏱️ Süre: {BAYRAK_TIME} Saniye"
-    )
-    return await chat.send_message(text, reply_markup=_bayrak_keyboard(game["options"], key))
-
-
-def _bayrak_start_timer(context: ContextTypes.DEFAULT_TYPE, key):
-    old = BAYRAK_TIMERS.get(key)
-    if old and not old.done():
-        old.cancel()
-    task = asyncio.create_task(_bayrak_timer_loop(context, key))
-    BAYRAK_TIMERS[key] = task
-
-
-async def _bayrak_timer_loop(context: ContextTypes.DEFAULT_TYPE, key):
-    try:
-        game = PENDING_GAMES.get(key)
-        if not game:
-            return
-        chat_id = game["chat_id"]
-        message_id = game["message_id"]
-
-        for remaining in range(BAYRAK_TIME - 1, -1, -1):
-            await asyncio.sleep(1)
-            game = PENDING_GAMES.get(key)
-            if not game:
-                return  # oyun artiq cavablandi / bitdi
-            text = (
-                f"🚩 Hangi ülkenin bayrağı bu?\n\n"
-                f"🚩 TUR: {game['round']}/{BAYRAK_ROUNDS} | ❤️: {game['lives']}\n"
-                f"⏱️ Süre: {remaining} Saniye"
-            )
-            try:
-                await context.bot.edit_message_text(
-                    text,
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    reply_markup=_bayrak_keyboard(game["options"], key),
-                )
-            except BadRequest:
-                pass
-
-        # vaxt bitdi
-        game = PENDING_GAMES.pop(key, None)
-        if not game:
-            return
-        new_bal = change_balance(game["user_id"], game["bet"])  # bahis iade
-        text = (
-            "⏱️ Süre Doldu!\n"
-            "15 saniye içinde cevap verilmediği için oyun iptal edildi ve bakiye iade edildi.\n"
-            f"💳 Bakiye: {fmt(new_bal)} TL"
-        )
-        try:
-            await context.bot.edit_message_text(text, chat_id=chat_id, message_id=message_id)
-        except BadRequest:
-            pass
-    except asyncio.CancelledError:
-        pass
-
-
-async def bayrak_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    _, _, key, idx_str = query.data.split("_", 3)
-    game = PENDING_GAMES.get(key)
-
-    if not game or game["user_id"] != user.id:
-        await query.answer("⚠️ Bu yarış artık geçerli değil.", show_alert=True)
+async def send_bayrak_round(chat_id, context: ContextTypes.DEFAULT_TYPE, first=False):
+    state = TEXT_GAME_STATE.get(chat_id)
+    if not state or state["type"] != "bayrak":
         return
 
-    await query.answer()
+    flag = state["flag"]
+    text = (
+        f"{flag}\n\n"
+        f"🚩 TUR: {state['round']}/{BAYRAK_ROUNDS} | ❤️: {state['lives']}\n"
+        f"⏱️ Süre: {BAYRAK_TIMEOUT} Saniye"
+    )
+    await context.bot.send_message(chat_id, text)
 
-    idx = int(idx_str)
-    picked = game["options"][idx]
-    correct = game["correct"]
+    if state.get("task"):
+        state["task"].cancel()
+    state["task"] = asyncio.create_task(bayrak_timeout_watcher(chat_id, context, state["round"]))
 
-    timer_task = BAYRAK_TIMERS.get(key)
-    if timer_task and not timer_task.done():
-        timer_task.cancel()
 
-    if picked == correct:
-        await safe_edit(query, "✅ Doğru Cevap!")
-        await asyncio.sleep(0.7)
+async def bayrak_timeout_watcher(chat_id, context: ContextTypes.DEFAULT_TYPE, round_no):
+    await asyncio.sleep(BAYRAK_TIMEOUT)
+    state = TEXT_GAME_STATE.get(chat_id)
+    if not state or state["type"] != "bayrak" or state["round"] != round_no:
+        return  # oyun artiq deyisib / bitib
 
-        if game["round"] >= BAYRAK_ROUNDS:
-            win = int(game["bet"] * 2.5)
+    user_id = state["user_id"]
+    bet = state["bet"]
+    change_balance(user_id, bet)  # bahisi geri qaytar
+    del TEXT_GAME_STATE[chat_id]
+
+    await context.bot.send_message(
+        chat_id,
+        "⏱️ Süre Doldu! 15 saniye içinde cevap verilmediği için oyun iptal edildi ve bakiye iade edildi.",
+    )
+
+
+async def handle_bayrak_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    if user.id != state["user_id"]:
+        return
+
+    guess = normalize(update.effective_message.text)
+    correct_answers = [normalize(a) for a in state["answers"]]
+
+    if state.get("task"):
+        state["task"].cancel()
+
+    if guess in correct_answers:
+        await reply(update, "✅ Doğru Cevap!")
+        state["round"] += 1
+        if state["round"] > BAYRAK_ROUNDS:
+            win = state["bet"] * 3
             new_bal = change_balance(user.id, win)
-            del PENDING_GAMES[key]
-            await query.message.chat.send_message(
-                f"🏁 TÜM TURLAR BİTTİ!\n✅ KAZANDIN! +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
+            del TEXT_GAME_STATE[chat_id]
+            await reply(
+                update,
+                f"🏆 TEBRİKLER! {BAYRAK_ROUNDS} turu tamamladın!\n"
+                f"✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL",
             )
             return
-
-        game["round"] += 1
-        new_correct, new_options = build_bayrak_round()
-        game["correct"] = new_correct
-        game["options"] = new_options
-        msg = await _bayrak_send_round(query.message.chat, key)
-        game["message_id"] = msg.message_id
-        _bayrak_start_timer(context, key)
+        flag, answers = random.choice(FLAGS_BANK)
+        state["flag"] = flag
+        state["answers"] = answers
+        await send_bayrak_round(chat_id, context)
     else:
-        game["lives"] -= 1
-        if game["lives"] <= 0:
-            bet = game["bet"]
-            del PENDING_GAMES[key]
-            await safe_edit(
-                query,
-                f"❌ Yanlış! Doğru Cevap: {correct[1]}\n\n"
-                f"💀 BİTTİ! ❌: 3\n📉: -{fmt(bet)} TL",
+        state["lives"] -= 1
+        correct_name = state["answers"][0].title()
+        if state["lives"] <= 0:
+            bet = state["bet"]
+            del TEXT_GAME_STATE[chat_id]
+            await reply(
+                update,
+                f"❌ Yanlış! Doğru Cevap: {correct_name}\n\n"
+                f"💀 BİTTİ! ❌: {BAYRAK_LIVES} 📉: -{fmt(bet)} TL",
             )
             return
+        await reply(update, f"❌ Yanlış! Doğru Cevap: {correct_name}")
+        state["round"] += 1
+        if state["round"] > BAYRAK_ROUNDS:
+            win = state["bet"] * 3
+            new_bal = change_balance(user.id, win)
+            del TEXT_GAME_STATE[chat_id]
+            await reply(
+                update,
+                f"🏆 TEBRİKLER! {BAYRAK_ROUNDS} turu tamamladın!\n"
+                f"✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL",
+            )
+            return
+        flag, answers = random.choice(FLAGS_BANK)
+        state["flag"] = flag
+        state["answers"] = answers
+        await send_bayrak_round(chat_id, context)
 
-        await safe_edit(query, f"❌ Yanlış! Doğru Cevap: {correct[1]}")
-        await asyncio.sleep(0.7)
-
-        new_correct, new_options = build_bayrak_round()
-        game["correct"] = new_correct
-        game["options"] = new_options
-        msg = await _bayrak_send_round(query.message.chat, key)
-        game["message_id"] = msg.message_id
-        _bayrak_start_timer(context, key)
 
 # ----------------------------------------------------------------------
-# 3) TAS KAGIT MAKAS (Bot ile / PvP Duello)
+# 3) TAS KAGIT MAKAS (mod secimi -> bot ile / duello PvP)
 # ----------------------------------------------------------------------
 
+TKM_USAGE = "✂️ Taş Kağıt Makas oynamak için lütfen şu formatta yazın:\n`/tkm [miktar]`\nÖrnek: `/tkm 200`"
 TKM_EMOJI = {"tas": "✊", "kagit": "📄", "makas": "✂️"}
 TKM_NAME = {"tas": "Taş", "kagit": "Kağıt", "makas": "Makas"}
 TKM_BEATS = {"tas": "makas", "kagit": "tas", "makas": "kagit"}
@@ -841,34 +873,25 @@ TKM_BEATS = {"tas": "makas", "kagit": "tas", "makas": "kagit"}
 async def tkm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, TKM_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "✂️ Taş Kağıt Makas oynamak için lütfen şu formatta yazın:\n`/tkm [miktar]`\n"
-            "Örnek: `/tkm 200`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
-    key = f"tkm_setup_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "user_name": user.first_name, "bet": bet}
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"tkm_setup_{game_key}"] = {"bet": bet, "creator_id": user.id, "creator_name": user.first_name}
 
-    keyboard = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("1️⃣ 1 Tur", callback_data=f"tkm_rounds_{key}_1"),
-            InlineKeyboardButton("3️⃣ 3 Tur", callback_data=f"tkm_rounds_{key}_3"),
-            InlineKeyboardButton("5️⃣ 5 Tur", callback_data=f"tkm_rounds_{key}_5"),
-        ]]
-    )
-    text = f"✂️ Taş Kağıt Makas\n💰 Bahis: {fmt(bet)} TL\nKaç tur oynanacak?"
-    await reply(update, text, reply_markup=keyboard)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("1️⃣ 1 Tur", callback_data=f"tkmrounds_{game_key}_1"),
+        InlineKeyboardButton("3️⃣ 3 Tur", callback_data=f"tkmrounds_{game_key}_3"),
+        InlineKeyboardButton("5️⃣ 5 Tur", callback_data=f"tkmrounds_{game_key}_5"),
+    ]])
+    await reply(update, f"✂️ Taş Kağıt Makas\n💰 Bahis: {fmt(bet)} TL\nKaç tur oynanacak?", reply_markup=keyboard)
 
 
 async def tkm_rounds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -876,35 +899,44 @@ async def tkm_rounds_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     user = query.from_user
     await query.answer()
 
-    _, _, key, rounds_str = query.data.split("_", 3)
-    setup = PENDING_GAMES.get(key)
-    if not setup or setup["user_id"] != user.id:
-        await safe_edit(query, "⚠️ Bu oyun artık geçerli değil.")
+    _, game_key, rounds_str = query.data.split("_", 2)
+    rounds = int(rounds_str)
+    setup_key = f"tkm_setup_{game_key}"
+    setup = PENDING_GAMES.get(setup_key)
+    if not setup or setup["creator_id"] != user.id:
+        await query.answer("⚠️ Bu oyun sana ait değil veya süresi geçti.", show_alert=True)
         return
 
-    target_rounds = int(rounds_str)
-    setup["target_rounds"] = target_rounds
+    setup["rounds"] = rounds
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🤖 Bot İle Oyna", callback_data=f"tkm_mode_{key}_bot")],
-            [InlineKeyboardButton("⚔️ Düello (PvP)", callback_data=f"tkm_mode_{key}_pvp")],
-        ]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🤖 Bot İle Oyna", callback_data=f"tkmmode_{game_key}_bot")],
+        [InlineKeyboardButton("⚔️ Düello (PvP)", callback_data=f"tkmmode_{game_key}_pvp")],
+    ])
+    await safe_edit(
+        query,
+        f"🎮 Oyun Modu Seçin\n💰 Bahis: {fmt(setup['bet'])} TL\n🏆 Hedeflenen Tur: {rounds}",
+        reply_markup=keyboard,
     )
-    text = (
-        f"🎮 Oyun Modu Seçin\n💰 Bahis: {fmt(setup['bet'])} TL\n"
-        f"🏆 Hedeflenen Tur: {target_rounds}"
-    )
-    await safe_edit(query, text, reply_markup=keyboard)
 
 
-def _tkm_choice_keyboard(prefix, key):
-    return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("✊ Taş", callback_data=f"{prefix}_{key}_tas"),
-            InlineKeyboardButton("📄 Kağıt", callback_data=f"{prefix}_{key}_kagit"),
-            InlineKeyboardButton("✂️ Makas", callback_data=f"{prefix}_{key}_makas"),
-        ]]
+def tkm_choice_keyboard(game_key):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✊ Taş", callback_data=f"tkmpick_{game_key}_tas"),
+        InlineKeyboardButton("📄 Kağıt", callback_data=f"tkmpick_{game_key}_kagit"),
+        InlineKeyboardButton("✂️ Makas", callback_data=f"tkmmpick_{game_key}_makas"),
+    ]])
+
+
+def tkm_render_status(game):
+    p1_name = game["names"][game["p1"]]
+    p2_label = "🤖 Bot" if game["p2"] == "bot" else game["names"][game["p2"]]
+    return (
+        f"🎮 TAŞ - KAĞIT - MAKAS\n"
+        f"🔴 {p1_name}: {game['score'][game['p1']]}   🔵 {p2_label}: {game['score'].get(game['p2'], 0)}\n\n"
+        f"🚩 Tur: {game['current_round']}/{game['rounds']}\n"
+        f"💰 Bahis: {fmt(game['bet'])} TL\n\n"
+        f"👇 Seçimini yap!"
     )
 
 
@@ -913,478 +945,351 @@ async def tkm_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = query.from_user
     await query.answer()
 
-    _, _, key, mode = query.data.split("_", 3)
-    setup = PENDING_GAMES.get(key)
-    if not setup or setup["user_id"] != user.id:
-        await safe_edit(query, "⚠️ Bu oyun artık geçerli değil.")
+    _, game_key, mode = query.data.split("_", 2)
+    setup_key = f"tkm_setup_{game_key}"
+    setup = PENDING_GAMES.get(setup_key)
+    if not setup or setup["creator_id"] != user.id:
+        await query.answer("⚠️ Bu oyun sana ait değil veya süresi geçti.", show_alert=True)
+        return
+
+    bal = get_balance(user.id)
+    if bal < setup["bet"]:
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
+        del PENDING_GAMES[setup_key]
         return
 
     if mode == "bot":
-        bal = get_balance(user.id)
-        bet = setup["bet"]
-        if bal < bet:
-            del PENDING_GAMES[key]
-            await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
-            return
-        change_balance(user.id, -bet)
+        change_balance(user.id, -setup["bet"])
+        del PENDING_GAMES[setup_key]
 
-        game_key = f"tkmbot_{key}"
-        PENDING_GAMES[game_key] = {
-            "user_id": user.id,
-            "user_name": setup["user_name"],
-            "bet": bet,
-            "target_rounds": setup["target_rounds"],
-            "round": 1,
-            "user_score": 0,
-            "bot_score": 0,
+        active_key = f"tkm_active_{game_key}"
+        PENDING_GAMES[active_key] = {
+            "bet": setup["bet"],
+            "rounds": setup["rounds"],
+            "current_round": 1,
+            "p1": user.id,
+            "p2": "bot",
+            "names": {user.id: user.first_name},
+            "score": {user.id: 0, "bot": 0},
+            "pending_pick": {},
         }
-        del PENDING_GAMES[key]
-
-        text = _tkm_bot_status_text(game_key)
-        await safe_edit(query, text, reply_markup=_tkm_choice_keyboard("tkmb", game_key))
+        game = PENDING_GAMES[active_key]
+        await safe_edit(query, tkm_render_status(game), reply_markup=tkm_choice_keyboard(game_key))
     else:
-        bal = get_balance(user.id)
-        bet = setup["bet"]
-        if bal < bet:
-            del PENDING_GAMES[key]
-            await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
-            return
-        change_balance(user.id, -bet)
-
-        duel_key = f"tkmduel_{key}"
-        PENDING_GAMES[duel_key] = {
+        active_key = f"tkm_pvpwait_{game_key}"
+        PENDING_GAMES[active_key] = {
+            "bet": setup["bet"],
+            "rounds": setup["rounds"],
             "creator_id": user.id,
-            "creator_name": setup["user_name"],
-            "bet": bet,
-            "target_rounds": setup["target_rounds"],
-            "status": "waiting",
+            "creator_name": user.first_name,
         }
-        del PENDING_GAMES[key]
-
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🤝 Katıl", callback_data=f"tkmjoin_{duel_key}")]]
-        )
-        text = (
-            f"🤝 TKM DÜELLO ÇAĞRISI\n👤 Kurucu: {setup['user_name']}\n"
-            f"💰 Bahis: {fmt(bet)} TL\n🏆 Tur: {setup['target_rounds']}\n\n"
-            "Rakip bekleniyor..."
-        )
-        await safe_edit(query, text, reply_markup=keyboard)
-
-
-def _tkm_bot_status_text(game_key, extra=""):
-    game = PENDING_GAMES[game_key]
-    base = (
-        f"🎮 TAŞ - KAĞIT - MAKAS\n"
-        f"🔴 {game['user_name']}: {game['user_score']}\n"
-        f"🔵 🤖 Bot: {game['bot_score']}\n\n"
-        f"🚩 Tur: {game['round']}/{game['target_rounds']}\n"
-        f"💰 Bahis: {fmt(game['bet'])} TL\n\n"
-        f"👇 Seçimini yap!"
-    )
-    if extra:
-        return f"{extra}\n\n{base}"
-    return base
-
-
-async def tkm_bot_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-    await query.answer()
-
-    prefix, key, choice = query.data.rsplit("_", 2)
-    game = PENDING_GAMES.get(key)
-    if not game or game["user_id"] != user.id:
-        await safe_edit(query, "⚠️ Bu oyun artık geçerli değil.")
-        return
-
-    bot_choice = random.choice(list(TKM_EMOJI.keys()))
-    rnd = game["round"]
-
-    if choice == bot_choice:
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"🤝 Berabere! Her ikisi de {TKM_EMOJI[choice]} yaptı."
-        )
-    elif TKM_BEATS[choice] == bot_choice:
-        game["user_score"] += 1
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"✅ {game['user_name']} kazandı! {TKM_EMOJI[choice]} vs {TKM_EMOJI[bot_choice]}"
-        )
-    else:
-        game["bot_score"] += 1
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"❌ 🤖 Bot kazandı! {TKM_EMOJI[choice]} vs {TKM_EMOJI[bot_choice]}"
+        del PENDING_GAMES[setup_key]
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🤝 Katıl", callback_data=f"tkmjoin_{game_key}")]])
+        await safe_edit(
+            query,
+            f"🤝 TKM DÜELLO ÇAĞRISI\n👤 Kurucu: {user.first_name}\n💰 Bahis: {fmt(setup['bet'])} TL\n"
+            f"🏆 Tur: {setup['rounds']}\n\nRakip bekleniyor...",
+            reply_markup=keyboard,
         )
 
-    target = game["target_rounds"]
-    finished = rnd >= target
-
-    if not finished:
-        game["round"] += 1
-        text = _tkm_bot_status_text(key, extra=result_text)
-        await safe_edit(query, text, reply_markup=_tkm_choice_keyboard("tkmb", key))
-        return
-
-    # oyun bitdi -> qalibi skor ile tesbit et
-    bet = game["bet"]
-    if game["user_score"] == game["bot_score"]:
-        new_bal = change_balance(user.id, bet)  # bahis iade
-        final_text = (
-            f"{result_text}\n\n"
-            "🤝 OYUN BİTTİ! Skorlar eşit, bakiye iade edildi!\n"
-            f"💳 Bakiye: {fmt(new_bal)} TL"
-        )
-    elif game["user_score"] > game["bot_score"]:
-        win = bet * 2
-        new_bal = change_balance(user.id, win)
-        final_text = (
-            f"{result_text}\n\n"
-            f"🏆 OYUN BİTTİ! Kazanan: {game['user_name']}\n"
-            f"💰 Kazanç: +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
-        )
-    else:
-        new_bal = get_balance(user.id)
-        final_text = (
-            f"{result_text}\n\n"
-            "💀 OYUN BİTTİ! Kazanan: Bot\n"
-            f"📉 Kayıp: -{fmt(bet)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
-        )
-
-    del PENDING_GAMES[key]
-    await safe_edit(query, final_text)
-
-
-# ---- TKM DUELLO (PvP) ----
 
 async def tkm_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    duel_key = query.data.replace("tkmjoin_", "")
-    game = PENDING_GAMES.get(duel_key)
+    game_key = query.data.replace("tkmjoin_", "")
+    wait_key = f"tkm_pvpwait_{game_key}"
+    wait = PENDING_GAMES.get(wait_key)
 
-    if not game or game["status"] != "waiting":
+    if not wait:
         await query.answer("⚠️ Bu düello artık geçerli değil.", show_alert=True)
         return
 
-    if user.id == game["creator_id"]:
-        await query.answer("⚠️ Kendi Oyunun!", show_alert=True)
+    if user.id == wait["creator_id"]:
+        await query.answer("Kendi Oyunun!", show_alert=True)
         return
-
-    await query.answer()
 
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = game["bet"]
     bal = get_balance(user.id)
-    if bal < bet:
-        await query.answer("Bakiyən yetersiz!", show_alert=True)
+    if bal < wait["bet"]:
+        await query.answer("Bakiyen yetersiz!", show_alert=True)
         return
 
-    change_balance(user.id, -bet)
+    change_balance(wait["creator_id"], -wait["bet"])
+    change_balance(user.id, -wait["bet"])
+    del PENDING_GAMES[wait_key]
 
-    game.update(
-        {
-            "status": "active",
-            "opponent_id": user.id,
-            "opponent_name": user.first_name,
-            "round": 1,
-            "score": {game["creator_id"]: 0, user.id: 0},
-            "moves": {},
-        }
-    )
-
-    text = _tkm_duel_status_text(duel_key)
-    await safe_edit(query, text, reply_markup=_tkm_choice_keyboard("tkmd", duel_key))
-
-
-def _tkm_duel_status_text(duel_key, extra=""):
-    game = PENDING_GAMES[duel_key]
-    c_id, o_id = game["creator_id"], game["opponent_id"]
-    base = (
-        f"🎮 TAŞ - KAĞIT - MAKAS (DÜELLO)\n"
-        f"🔴 {game['creator_name']}: {game['score'][c_id]}\n"
-        f"🔵 {game['opponent_name']}: {game['score'][o_id]}\n\n"
-        f"🚩 Tur: {game['round']}/{game['target_rounds']}\n"
-        f"💰 Bahis: {fmt(game['bet'])} TL\n\n"
-        f"👇 Seçimini yap!"
-    )
-    if extra:
-        return f"{extra}\n\n{base}"
-    return base
+    active_key = f"tkm_active_{game_key}"
+    PENDING_GAMES[active_key] = {
+        "bet": wait["bet"],
+        "rounds": wait["rounds"],
+        "current_round": 1,
+        "p1": wait["creator_id"],
+        "p2": user.id,
+        "names": {wait["creator_id"]: wait["creator_name"], user.id: user.first_name},
+        "score": {wait["creator_id"]: 0, user.id: 0},
+        "pending_pick": {},
+    }
+    game = PENDING_GAMES[active_key]
+    await safe_edit(query, tkm_render_status(game), reply_markup=tkm_choice_keyboard(game_key))
 
 
-async def tkm_duel_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def tkm_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    _, duel_key, choice = query.data.split("_", 2)
-    game = PENDING_GAMES.get(duel_key)
+    raw = query.data
+    raw = raw.replace("tkmmpick_", "tkmpick_")
+    _, game_key, choice = raw.split("_", 2)
 
-    if not game or game.get("status") != "active":
-        await query.answer("⚠️ Bu oyun artık geçerli değil.", show_alert=True)
+    active_key = f"tkm_active_{game_key}"
+    game = PENDING_GAMES.get(active_key)
+    if not game:
+        await query.answer("⚠️ Oyun bulunamadı veya bitti.", show_alert=True)
         return
 
-    if user.id not in (game["creator_id"], game["opponent_id"]):
+    if user.id not in (game["p1"], game["p2"]):
         await query.answer("Bu oyunda değilsin!", show_alert=True)
         return
 
-    if user.id in game["moves"]:
-        await query.answer("Bu tur için zaten seçim yaptın!", show_alert=True)
+    if user.id in game["pending_pick"]:
+        await query.answer("Zaten seçim yaptın, rakip bekleniyor.", show_alert=True)
         return
 
-    await query.answer()
-    game["moves"][user.id] = choice
+    game["pending_pick"][user.id] = choice
 
-    c_id, o_id = game["creator_id"], game["opponent_id"]
-    if len(game["moves"]) < 2:
-        return  # diger oyuncu hele secmeyib
-
-    c_choice = game["moves"][c_id]
-    o_choice = game["moves"][o_id]
-    rnd = game["round"]
-
-    if c_choice == o_choice:
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"🤝 Berabere! Her ikisi de {TKM_EMOJI[c_choice]} yaptı."
-        )
-    elif TKM_BEATS[c_choice] == o_choice:
-        game["score"][c_id] += 1
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"✅ {game['creator_name']} kazandı! {TKM_EMOJI[c_choice]} vs {TKM_EMOJI[o_choice]}"
-        )
+    if game["p2"] == "bot":
+        bot_choice = random.choice(list(TKM_EMOJI.keys()))
+        game["pending_pick"]["bot"] = bot_choice
     else:
-        game["score"][o_id] += 1
-        result_text = (
-            f"🔄 TUR {rnd} SONUCU\n"
-            f"✅ {game['opponent_name']} kazandı! {TKM_EMOJI[o_choice]} vs {TKM_EMOJI[c_choice]}"
-        )
+        if len(game["pending_pick"]) < 2:
+            await query.answer("Seçimin alındı, rakip bekleniyor...", show_alert=True)
+            return
 
-    target = game["target_rounds"]
-    finished = rnd >= target
+    p1, p2 = game["p1"], game["p2"]
+    c1, c2 = game["pending_pick"][p1], game["pending_pick"][p2]
+    p1_name = game["names"][p1]
+    p2_name = "🤖 Bot" if p2 == "bot" else game["names"][p2]
 
-    if not finished:
-        game["round"] += 1
-        game["moves"] = {}
-        text = _tkm_duel_status_text(duel_key, extra=result_text)
-        await query.message.edit_text(text, reply_markup=_tkm_choice_keyboard("tkmd", duel_key))
-        return
+    round_no = game["current_round"]
+
+    if c1 == c2:
+        result_line = f"🤝 Berabere! Her ikisi de {TKM_EMOJI[c1]} yaptı."
+        winner = None
+    elif TKM_BEATS[c1] == c2:
+        winner = p1
+        result_line = f"✅ {p1_name} kazandı! {TKM_EMOJI[c1]} vs {TKM_EMOJI[c2]}"
+        game["score"][p1] += 1
+    else:
+        winner = p2
+        result_line = f"❌ {p2_name} kazandı! {TKM_EMOJI[c1]} vs {TKM_EMOJI[c2]}"
+        game["score"][p2] += 1
+
+    text = f"🔄 TUR {round_no} SONUCU\n{result_line}"
+
+    game["current_round"] += 1
+    game["pending_pick"] = {}
 
     bet = game["bet"]
-    s_c, s_o = game["score"][c_id], game["score"][o_id]
 
-    if s_c == s_o:
-        change_balance(c_id, bet)
-        change_balance(o_id, bet)
-        final_text = (
-            f"{result_text}\n\n"
-            "🤝 OYUN BİTTİ! Skorlar eşit, bakiyeler iade edildi!"
-        )
-    elif s_c > s_o:
-        win = bet * 2
-        change_balance(c_id, win)
-        final_text = (
-            f"{result_text}\n\n"
-            f"🏆 OYUN BİTTİ! Kazanan: {game['creator_name']}\n💰 Kazanç: +{fmt(win)} TL"
-        )
-    else:
-        win = bet * 2
-        change_balance(o_id, win)
-        final_text = (
-            f"{result_text}\n\n"
-            f"🏆 OYUN BİTTİ! Kazanan: {game['opponent_name']}\n💰 Kazanç: +{fmt(win)} TL"
-        )
+    if game["current_round"] > game["rounds"]:
+        s1, s2 = game["score"][p1], game["score"].get(p2, 0)
+        del PENDING_GAMES[active_key]
 
-    del PENDING_GAMES[duel_key]
-    await query.message.edit_text(final_text)
+        if s1 == s2:
+            if p2 != "bot":
+                change_balance(p1, bet)
+                change_balance(p2, bet)
+            else:
+                change_balance(p1, bet)
+            text += "\n\n🤝 OYUN BİTTİ!\nSkorlar eşit, bakiye iade edildi!"
+        elif s1 > s2:
+            win = bet * 2
+            change_balance(p1, win)
+            text += f"\n\n🏆 OYUN BİTTİ!\nKazanan: {p1_name}\n💰 Kazanç: +{fmt(win)} TL"
+        else:
+            if p2 == "bot":
+                text += f"\n\n💀 OYUN BİTTİ!\nKazanan: Bot\n📉 Kayıp: -{fmt(bet)} TL"
+            else:
+                win = bet * 2
+                change_balance(p2, win)
+                text += f"\n\n💀 OYUN BİTTİ!\nKazanan: {p2_name}\n📉 Kayıp: -{fmt(bet)} TL"
+
+        await safe_edit(query, text)
+        return
+
+    await safe_edit(query, text)
+    await asyncio.sleep(1.2)
+    try:
+        await query.message.reply_text(tkm_render_status(game), reply_markup=tkm_choice_keyboard(game_key))
+    except BadRequest:
+        pass
+
 
 # ----------------------------------------------------------------------
 # 4) YAZI TURA
 # ----------------------------------------------------------------------
 
+YT_USAGE = "🪙 Yazı-Tura oynamak için lütfen şu formatta yazın:\n`/ytsans [miktar]`\nÖrnek: `/ytsans 100`"
+
+
 async def ytsans_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, YT_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🪙 Yazı-Tura oynamak için lütfen şu formatta yazın:\n`/ytsans [miktar]`\n"
-            "Örnek: `/ytsans 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
-    key = f"yt_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "bet": bet}
-
-    keyboard = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("🪙 YAZI", callback_data=f"yt_pick_{key}_yazi"),
-            InlineKeyboardButton("🪙 TURA", callback_data=f"yt_pick_{key}_tura"),
-        ]]
-    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✨ YAZI", callback_data=f"yt_{user.id}_{bet}_yazi"),
+        InlineKeyboardButton("🌙 TURA", callback_data=f"yt_{user.id}_{bet}_tura"),
+    ]])
     await reply(update, f"🪙 {fmt(bet)} TL bahis. Seç:", reply_markup=keyboard)
 
 
-async def ytsans_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def yt_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    _, _, key, choice = query.data.split("_", 3)
-    game = PENDING_GAMES.get(key)
-    if not game or game["user_id"] != user.id:
-        await query.answer("⚠️ Bu oyun artık geçerli değil.", show_alert=True)
+    _, owner_id_str, bet_str, choice = query.data.split("_")
+    owner_id = int(owner_id_str)
+    bet = int(bet_str)
+
+    if user.id != owner_id:
+        await query.answer("Bu senin oyunun değil!", show_alert=True)
         return
 
     bal = get_balance(user.id)
-    bet = game["bet"]
     if bal < bet:
-        del PENDING_GAMES[key]
-        await query.answer("Bakiyən yetersiz!", show_alert=True)
-        await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
-
-    await query.answer()
     change_balance(user.id, -bet)
-    del PENDING_GAMES[key]
 
     await safe_edit(query, "🪙 Para havada dönüyor...")
     await asyncio.sleep(2)
 
     result = random.choice(["yazi", "tura"])
-    result_label = "YAZI" if result == "yazi" else "TURA"
+    result_label = "✨ YAZI" if result == "yazi" else "🌙 TURA"
 
     if result == choice:
         win = bet * 2
         new_bal = change_balance(user.id, win)
-        text = f"✨ {result_label} geldi!\n✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
+        text = f"{result_label} geldi! ✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
     else:
         new_bal = get_balance(user.id)
-        text = f"✨ {result_label} geldi!\n❌ -{fmt(bet)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
+        text = f"{result_label} geldi! ❌ -{fmt(bet)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
 
     await safe_edit(query, text)
 
 
 # ----------------------------------------------------------------------
-# 5) BUL BENI (KUTU) - 3x3
+# 5) BUL BENI (KUTU) - 3x3, 1 dolu 8 bos, 3 hak
 # ----------------------------------------------------------------------
+
+KUTU_USAGE = "🔍 Bul beni kutu oyunu için lütfen şu formatta yazın:\n`/bulbeni [miktar]`\nÖrnek: `/bulbeni 300`"
+KUTU_LIVES = 3
+
 
 async def bulbeni_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, KUTU_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🔍 Bul beni kutu oyunu için lütfen şu formatta yazın:\n`/bulbeni [miktar]`\n"
-            "Örnek: `/bulbeni 300`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
-    if not await check_and_take_bet(update, user.id, bet):
+    bal = get_balance(user.id)
+    if bal < bet:
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
+    change_balance(user.id, -bet)
 
-    key = f"bb_{user.id}_{int(time.time())}"
     winner_box = random.randint(0, 8)
-    PENDING_GAMES[key] = {
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"kutu_{game_key}"] = {
         "user_id": user.id,
         "bet": bet,
         "winner": winner_box,
-        "lives": 3,
+        "lives": KUTU_LIVES,
         "opened": set(),
-        "boxes": ["📦"] * 9,
     }
 
-    text = f"🔍 {fmt(bet)} TL bahis!\n❤️ 3 Hak\nÖdül hangi kutuda?"
-    await reply(update, text, reply_markup=_bulbeni_keyboard(key))
+    text = f"🔍 {fmt(bet)} TL bahis!\n❤️ {KUTU_LIVES} Hak\nÖdül hangi kutuda?"
+    await reply(update, text, reply_markup=kutu_keyboard(game_key, set()))
 
 
-def _bulbeni_keyboard(key):
-    game = PENDING_GAMES[key]
+def kutu_keyboard(game_key, opened):
     rows = []
     for r in range(3):
         row = []
         for c in range(3):
             i = r * 3 + c
-            label = game["boxes"][i]
-            row.append(InlineKeyboardButton(label, callback_data=f"bb_pick_{key}_{i}"))
+            label = "❌" if i in opened else "📦"
+            row.append(InlineKeyboardButton(label, callback_data=f"kutu_{game_key}_{i}"))
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
 
-async def bulbeni_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def kutu_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    _, _, key, idx_str = query.data.split("_", 3)
-    game = PENDING_GAMES.get(key)
-    if not game or game["user_id"] != user.id:
-        await query.answer("⚠️ Bu oyun artık geçerli değil.", show_alert=True)
+    parts = query.data.split("_")
+    idx = int(parts[-1])
+    game_key = "_".join(parts[1:-1])
+    state_key = f"kutu_{game_key}"
+    game = PENDING_GAMES.get(state_key)
+
+    if not game:
+        await query.answer("⚠️ Oyun bulunamadı veya bitti.", show_alert=True)
         return
-
-    idx = int(idx_str)
+    if user.id != game["user_id"]:
+        await query.answer("Bu senin oyunun değil!", show_alert=True)
+        return
     if idx in game["opened"]:
         await query.answer("Bu kutu zaten açıldı!", show_alert=True)
         return
 
-    await query.answer()
+    bet = game["bet"]
 
     if idx == game["winner"]:
-        win = game["bet"] * 2
+        win = bet * 2
         new_bal = change_balance(user.id, win)
-        del PENDING_GAMES[key]
-        game["boxes"][idx] = "💎"
-        text = f"💎 BULDUN!\n✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
-        await safe_edit(query, text, reply_markup=_bulbeni_static_keyboard(game["boxes"]))
+        del PENDING_GAMES[state_key]
+        game["opened"].add(idx)
+        text = f"💎 BULDUN! ✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
+        await safe_edit(query, text, reply_markup=kutu_keyboard(game_key, game["opened"]))
         return
 
     game["opened"].add(idx)
-    game["boxes"][idx] = "❌"
     game["lives"] -= 1
 
     if game["lives"] <= 0:
-        bet = game["bet"]
-        del PENDING_GAMES[key]
-        game["boxes"][game["winner"]] = "💎"
-        text = f"💀 KAYIP! Ödül {fmt(bet)} idi.\n📉 -{fmt(bet)} TL"
-        await safe_edit(query, text, reply_markup=_bulbeni_static_keyboard(game["boxes"]))
+        del PENDING_GAMES[state_key]
+        text = f"💀 KAYIP! Ödül {game['winner']+1}. kutudaydı."
+        await safe_edit(query, text, reply_markup=kutu_keyboard(game_key, game["opened"]))
         return
 
     text = f"❌ Boş! ❤️: {game['lives']}"
-    await safe_edit(query, text, reply_markup=_bulbeni_keyboard(key))
-
-
-def _bulbeni_static_keyboard(boxes):
-    rows = []
-    for r in range(3):
-        row = []
-        for c in range(3):
-            i = r * 3 + c
-            row.append(InlineKeyboardButton(boxes[i], callback_data="bb_done"))
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
-
-
-async def bulbeni_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
+    await safe_edit(query, text, reply_markup=kutu_keyboard(game_key, game["opened"]))
 
 
 # ----------------------------------------------------------------------
-# 6) XOX DUELLO (PvP)
+# 6) X0X DUELLO (2 oyuncu)
 # ----------------------------------------------------------------------
+
+XOX_USAGE = "❌ XOX düellosu başlatmak için lütfen şu formatta yazın:\n`/xox [miktar]`\nÖrnek: `/xox 500`"
+
 
 def xox_render_board(board):
     rows = []
@@ -1398,7 +1303,7 @@ def xox_render_board(board):
 
 
 def xox_keyboard(board, game_key):
-    buttons = []
+    rows = []
     for r in range(3):
         row = []
         for c in range(3):
@@ -1406,8 +1311,8 @@ def xox_keyboard(board, game_key):
             v = board[i]
             label = v if v != " " else "·"
             row.append(InlineKeyboardButton(label, callback_data=f"xoxmv_{game_key}_{i}"))
-        buttons.append(row)
-    return InlineKeyboardMarkup(buttons)
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
 
 
 def xox_check_winner(board):
@@ -1427,137 +1332,126 @@ def xox_check_winner(board):
 async def xox_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, XOX_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "❌ XOX düellosu başlatmak için lütfen şu formatta yazın:\n`/xox [miktar]`\n"
-            "Örnek: `/xox 500`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
-    game_key = f"{update.effective_chat.id}_{user.id}_{int(time.time())}"
+    game_key = f"{user.id}_{int(time.time()*1000)}"
     PENDING_GAMES[f"xoxwait_{game_key}"] = {
         "creator_id": user.id,
         "creator_name": user.first_name,
         "bet": bet,
     }
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("⚔️ Düelloya Katıl", callback_data=f"xoxjoin_{game_key}")],
-            [InlineKeyboardButton("❌ Oyunu Kapat", callback_data=f"xoxcancel_{game_key}")],
-        ]
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⚔️ Düelloya Katıl", callback_data=f"xoxjoin_{game_key}")],
+        [InlineKeyboardButton("🚫 Oyunu Kapat", callback_data=f"xoxcancel_{game_key}")],
+    ])
+    await reply(
+        update,
+        f"⚔️ XOX DÜELLO!\n💰: {fmt(bet)} TL\n👤 {user.first_name} rakip bekliyor...",
+        reply_markup=keyboard,
     )
-    text = (
-        f"⚔️ XOX DÜELLO!\n💰: {fmt(bet)} TL\n👤 {user.first_name}\n\nrakip bekliyor..."
-    )
-    await reply(update, text, reply_markup=keyboard)
+
+
+async def xox_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = query.from_user
+    await query.answer()
+
+    game_key = query.data.replace("xoxcancel_", "")
+    wait_key = f"xoxwait_{game_key}"
+    wait = PENDING_GAMES.get(wait_key)
+
+    if not wait:
+        await query.answer("⚠️ Bu düello artık geçerli değil.", show_alert=True)
+        return
+    if user.id != wait["creator_id"]:
+        await query.answer("Sadece kurucu kapatabilir!", show_alert=True)
+        return
+
+    change_balance(user.id, wait["bet"])
+    del PENDING_GAMES[wait_key]
+    await safe_edit(query, "❌ Oyun kurucu tarafından iptal edildi.")
 
 
 async def xox_join_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
     game_key = query.data.replace("xoxjoin_", "")
     wait_key = f"xoxwait_{game_key}"
-    pending = PENDING_GAMES.get(wait_key)
+    wait = PENDING_GAMES.get(wait_key)
 
-    if not pending:
+    if not wait:
         await query.answer("⚠️ Bu düello artık geçerli değil.", show_alert=True)
         return
-
-    if user.id == pending["creator_id"]:
-        await query.answer("⚠️ Kendi Oyunun!", show_alert=True)
+    if user.id == wait["creator_id"]:
+        await query.answer("Kendi Oyunun!", show_alert=True)
         return
 
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = pending["bet"]
+    bet = wait["bet"]
     bal = get_balance(user.id)
     if bal < bet:
-        await query.answer("Bakiyən yetersiz!", show_alert=True)
+        await query.answer("Bakiyen yetersiz!", show_alert=True)
         return
 
-    await query.answer()
-    change_balance(pending["creator_id"], -bet)
+    change_balance(wait["creator_id"], -bet)
     change_balance(user.id, -bet)
     del PENDING_GAMES[wait_key]
 
     active_key = f"xoxactive_{game_key}"
     PENDING_GAMES[active_key] = {
         "board": [" "] * 9,
-        "players": {pending["creator_id"]: "❌", user.id: "⭕"},
-        "names": {pending["creator_id"]: pending["creator_name"], user.id: user.first_name},
-        "turn": pending["creator_id"],
+        "players": {wait["creator_id"]: "❌", user.id: "⭕"},
+        "names": {wait["creator_id"]: wait["creator_name"], user.id: user.first_name},
+        "turn": wait["creator_id"],
         "bet": bet,
     }
 
     game = PENDING_GAMES[active_key]
     text = (
-        f"❌ {game['names'][pending['creator_id']]}  VS  ⭕ {user.first_name}\n"
+        f"❌ {game['names'][wait['creator_id']]}  VS  ⭕ {user.first_name}\n"
         f"💰 Bahis: {fmt(bet)} TL (her oyuncudan alındı)\n\n"
         f"Sıra: {game['names'][game['turn']]} (❌)"
     )
     await safe_edit(query, text, reply_markup=xox_keyboard(game["board"], game_key))
 
 
-async def xox_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user = query.from_user
-
-    game_key = query.data.replace("xoxcancel_", "")
-    wait_key = f"xoxwait_{game_key}"
-    pending = PENDING_GAMES.get(wait_key)
-
-    if not pending:
-        await query.answer("⚠️ Bu düello artık geçerli değil.", show_alert=True)
-        return
-
-    if user.id != pending["creator_id"]:
-        await query.answer("Sadece kurucu kapatabilir!", show_alert=True)
-        return
-
-    await query.answer()
-    del PENDING_GAMES[wait_key]
-    await safe_edit(query, "❌ Oyun kurucu tarafından iptal edildi.")
-
-
 async def xox_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    _, game_key, idx_str = query.data.split("_", 2)
-    idx = int(idx_str)
+    parts = query.data.split("_")
+    idx = int(parts[-1])
+    game_key = "_".join(parts[1:-1])
     active_key = f"xoxactive_{game_key}"
     game = PENDING_GAMES.get(active_key)
 
     if not game:
         await query.answer("⚠️ Oyun bulunamadı veya bitti.", show_alert=True)
         return
-
     if user.id not in game["players"]:
         await query.answer("Bu oyunda değilsin!", show_alert=True)
         return
-
     if game["turn"] != user.id:
         await query.answer("Sıra sende değil!", show_alert=True)
         return
-
     if game["board"][idx] != " ":
         await query.answer("Burası dolu!", show_alert=True)
         return
 
-    await query.answer()
     symbol = game["players"][user.id]
     game["board"][idx] = symbol
-
     result = xox_check_winner(game["board"])
 
     if result == "draw":
@@ -1583,56 +1477,48 @@ async def xox_move_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     other_id = [pid for pid in game["players"] if pid != user.id][0]
     game["turn"] = other_id
-
     text = (
         f"{xox_render_board(game['board'])}\n\n"
         f"Sıra: {game['names'][other_id]} ({game['players'][other_id]})"
     )
     await safe_edit(query, text, reply_markup=xox_keyboard(game["board"], game_key))
 
+
 # ----------------------------------------------------------------------
-# 7) SAYI TAHMIN (1-100, pot sistemi)
+# 7) SAYI TAHMIN (1-100, mesaj-bazli, pot azalir hint-le)
 # ----------------------------------------------------------------------
+
+TAHMIN_USAGE = "🔢 Sayı tahmin oyunu için lütfen şu formatta yazın:\n`/tahminet [miktar]`\nÖrnek: `/tahminet 50`"
+
 
 async def tahminet_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, TAHMIN_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🔢 Sayı tahmin oyunu için lütfen şu formatta yazın:\n`/tahminet [miktar]`\n"
-            "Örnek: `/tahminet 50`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
-
-    if not await check_and_take_bet(update, user.id, bet):
+    if not await take_bet_or_warn(update, user.id, bet):
         return
 
     chat_id = update.effective_chat.id
     number = random.randint(1, 100)
-    GUESS_NUMBER_STATE[chat_id] = {
-        "number": number,
+    TEXT_GAME_STATE[chat_id] = {
+        "type": "tahmin",
         "user_id": user.id,
+        "number": number,
         "bet": bet,
         "pot": bet,
         "tries": 0,
     }
 
-    await reply(
-        update,
-        f"🔢 Sayı Tahmin! (0-100)\n💰 Bahis: {fmt(bet)} TL\nSayıyı yaz!",
-    )
+    await reply(update, f"🔢 Sayı Tahmin! (0-100)\n💰 Bahis: {fmt(bet)} TL\nSayıyı yaz!")
 
 
-async def handle_number_guess_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_tahmin_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    state = GUESS_NUMBER_STATE.get(chat_id)
-
-    if not state or state["user_id"] != user.id:
+    if user.id != state["user_id"]:
         return
 
     text = update.effective_message.text.strip()
@@ -1643,79 +1529,67 @@ async def handle_number_guess_message(update: Update, context: ContextTypes.DEFA
     number = state["number"]
 
     if guess == number:
-        win = state["pot"] * 2
+        win = state["bet"] * 2
         new_bal = change_balance(user.id, win)
-        await reply(
-            update,
-            f"🎉 Tebrikler! Doğru sayı {number} idi!\n+{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL",
-        )
-        del GUESS_NUMBER_STATE[chat_id]
+        await reply(update, f"🎉 Doğru! Sayı {number} idi.\n✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL")
+        del TEXT_GAME_STATE[chat_id]
         return
 
     state["tries"] += 1
-    if state["tries"] >= 10:
+    state["pot"] = max(0, state["pot"] - max(1, state["bet"] // 10))
+
+    if state["pot"] <= 0 or state["tries"] >= 8:
         new_bal = get_balance(user.id)
-        await reply(
-            update,
-            f"💀 Elendin! Sayı: {number}\n💳 Bakiye: {fmt(new_bal)} TL",
-        )
-        del GUESS_NUMBER_STATE[chat_id]
+        await reply(update, f"💀 Elendin! Sayı: {number}\n💳 Bakiye: {fmt(new_bal)} TL")
+        del TEXT_GAME_STATE[chat_id]
         return
 
-    # pot, her cehdden sonra azalir/cekilir; tahmin yonunu de gosterir
-    pot_step = max(state["bet"] // 10, 1)
-    state["pot"] = max(state["pot"] - pot_step, pot_step)
-
-    direction = "📈 Yukarı" if guess < number else "📉 Aşağı"
-    await reply(update, f"{direction}\n💰 Pot: {fmt(state['pot'])} TL")
+    if guess < number:
+        await reply(update, f"📈 Yukarı\n💰 Pot: {fmt(state['pot'])} TL")
+    else:
+        await reply(update, f"📉 Aşağı\n💰 Pot: {fmt(state['pot'])} TL")
 
 
 # ----------------------------------------------------------------------
-# 8) BULMACA (ADAM ASMACA) - zorluk secimli
+# 8) BOSLUK DOLDURMA / BULMACA (Adam Asmaca tarzi)
 # ----------------------------------------------------------------------
 
-HANGMAN_WORDS = {
-    "kolay": ["GÜL", "KOL", "SU", "EV", "AT", "KAR", "SAÇ", "GÖL"],
-    "orta": ["MASA", "KAPI", "KEDİ", "KİTAP", "BALIK", "ORMAN", "DENİZ", "GÜNEŞ"],
-    "zor": ["PENCERE", "BİLGİSAYAR", "YAĞMURLUK", "KAHVALTI", "ÖĞRETMEN", "TELEFON"],
-}
+BULMACA_USAGE = "🧩 Adam asmaca oyunu için lütfen şu formatta yazın:\n`/bulmaca [miktar]`\nÖrnek: `/bulmaca 100`"
+BULMACA_LIVES = 3
 
 
 async def bulmaca_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, BULMACA_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🧩 Adam asmaca oyunu için lütfen şu formatta yazın:\n`/bulmaca [miktar]`\n"
-            "Örnek: `/bulmaca 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
-    key = f"hm_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "bet": bet}
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"bulmacasetup_{game_key}"] = {"user_id": user.id, "bet": bet}
 
-    keyboard = InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("🟢 Kolay", callback_data=f"hmdiff_{key}_kolay"),
-            InlineKeyboardButton("🟡 Orta", callback_data=f"hmdiff_{key}_orta"),
-            InlineKeyboardButton("🔴 Zor", callback_data=f"hmdiff_{key}_zor"),
-        ]]
-    )
-    text = f"🧩 Bulmaca (Adam Asmaca)\n💰 Bahis: {fmt(bet)} TL\nZorluk seçimi yapın:"
-    await reply(update, text, reply_markup=keyboard)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🟢 Kolay", callback_data=f"bulmacadiff_{game_key}_kolay"),
+        InlineKeyboardButton("🟡 Orta", callback_data=f"bulmacadiff_{game_key}_orta"),
+        InlineKeyboardButton("🔴 Zor", callback_data=f"bulmacadiff_{game_key}_zor"),
+    ]])
+    await reply(update, f"🧩 Bulmaca (Adam Asmaca)\n💰 Bahis: {fmt(bet)} TL\nZorluk seçimi yapın:", reply_markup=keyboard)
 
 
-def _hangman_render(word, guessed):
-    return " ".join(c if c in guessed else "_" for c in word)
+def render_bulmaca_word(word, guessed_letters):
+    cells = []
+    for ch in word:
+        if normalize(ch) in guessed_letters:
+            cells.append(ch.upper())
+        else:
+            cells.append("_")
+    return " ".join(cells)
 
 
 async def bulmaca_diff_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1723,135 +1597,111 @@ async def bulmaca_diff_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = query.from_user
     await query.answer()
 
-    _, key, diff = query.data.split("_", 2)
-    setup = PENDING_GAMES.get(key)
+    _, game_key, diff = query.data.split("_", 2)
+    setup_key = f"bulmacasetup_{game_key}"
+    setup = PENDING_GAMES.get(setup_key)
     if not setup or setup["user_id"] != user.id:
-        await safe_edit(query, "⚠️ Bu oyun artık geçerli değil.")
+        await query.answer("⚠️ Bu oyun sana ait değil veya süresi geçti.", show_alert=True)
         return
 
     bal = get_balance(user.id)
-    bet = setup["bet"]
-    if bal < bet:
-        del PENDING_GAMES[key]
-        await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+    if bal < setup["bet"]:
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
+        del PENDING_GAMES[setup_key]
         return
-    change_balance(user.id, -bet)
-    del PENDING_GAMES[key]
+    change_balance(user.id, -setup["bet"])
+    del PENDING_GAMES[setup_key]
 
-    word = random.choice(HANGMAN_WORDS[diff])
-    diff_label = {"kolay": "Kolay", "orta": "Orta", "zor": "Zor"}[diff]
+    min_len, max_len = HANGMAN_DIFFICULTY[diff]
+    word = pick_word(min_len, max_len)
 
     chat_id = update.effective_chat.id
-    HANGMAN_STATE[chat_id] = {
+    TEXT_GAME_STATE[chat_id] = {
+        "type": "bulmaca",
         "user_id": user.id,
+        "bet": setup["bet"],
         "word": word,
         "guessed": set(),
-        "lives": 3,
-        "bet": bet,
-        "diff": diff_label,
+        "lives": BULMACA_LIVES,
+        "diff": diff.title(),
     }
 
+    masked = render_bulmaca_word(word, set())
     text = (
-        f"🎮 Bulmaca başladı! Zorluk: {diff_label}\n"
-        f"Kelime: `{_hangman_render(word, set())}`\n"
-        f"({len(word)} harf) ❤️ Hak: 3\n\n"
-        f"👉 Bir harf gönderin!"
+        f"🎮 Bulmaca başladı!\nZorluk: {diff.title()}\nKelime:\n\n`{masked}`\n\n"
+        f"({len(word)} harf) ❤️ Hak: {BULMACA_LIVES}\n\n👉 Bir harf gönderin!"
     )
     await safe_edit(query, text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def handle_hangman_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_bulmaca_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    state = HANGMAN_STATE.get(chat_id)
-
-    if not state or state["user_id"] != user.id:
+    if user.id != state["user_id"]:
         return
 
-    letter = update.effective_message.text.strip().upper()
-    if len(letter) != 1 or not letter.isalpha():
+    raw = update.effective_message.text.strip()
+    if len(raw) != 1 or not raw.isalpha():
         return
 
+    letter_n = normalize(raw)
     word = state["word"]
+    bet = state["bet"]
 
-    if letter in state["guessed"]:
-        return
-
-    state["guessed"].add(letter)
-
-    if letter not in word:
+    if letter_n in [normalize(c) for c in word]:
+        state["guessed"].add(letter_n)
+        masked = render_bulmaca_word(word, state["guessed"])
+        if "_" not in masked:
+            win = int(bet * 2)
+            new_bal = change_balance(user.id, win)
+            await reply(update, f"🎉 BULDUN! Kelime: `{word.upper()}`\n✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL", parse_mode=ParseMode.MARKDOWN)
+            del TEXT_GAME_STATE[chat_id]
+            return
+        await reply(update, f"✅ Doğru!\nKelime: `{masked}`", parse_mode=ParseMode.MARKDOWN)
+    else:
         state["lives"] -= 1
         if state["lives"] <= 0:
-            bet = state["bet"]
-            del HANGMAN_STATE[chat_id]
-            await reply(update, f"💀 ELENDİN! Kelime: `{word}`\n📉 Kayıp: -{fmt(bet)} TL", parse_mode=ParseMode.MARKDOWN)
+            del TEXT_GAME_STATE[chat_id]
+            await reply(update, f"💀 ELENDİN!\nKelime: `{word.upper()}`\n📉 Kayıp: -{fmt(bet)} TL", parse_mode=ParseMode.MARKDOWN)
             return
-        await reply(
-            update,
-            f"❌ Yanlış! ❤️ Kalan Hak: {state['lives']}\nKelime: `{_hangman_render(word, state['guessed'])}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    # dogru herf
-    if all(c in state["guessed"] for c in word):
-        bet = state["bet"]
-        win = bet * 3
-        new_bal = change_balance(user.id, win)
-        del HANGMAN_STATE[chat_id]
-        await reply(
-            update,
-            f"🎉 BULDUN! Kelime: `{word}`\n✅ +{fmt(win)} TL\n💳 Bakiye: {fmt(new_bal)} TL",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    await reply(
-        update,
-        f"✅ Doğru!\nKelime: `{_hangman_render(word, state['guessed'])}`",
-        parse_mode=ParseMode.MARKDOWN,
-    )
+        masked = render_bulmaca_word(word, state["guessed"])
+        await reply(update, f"❌ Yanlış! ❤️ Kalan Hak: {state['lives']}\nKelime: `{masked}`", parse_mode=ParseMode.MARKDOWN)
 
 
 # ----------------------------------------------------------------------
 # 9) KELIME ZINCIRI
 # ----------------------------------------------------------------------
 
-WORD_CHAIN_SEED_WORDS = ["MASA", "KİTAP", "ARABA", "DENİZ", "GÜNEŞ", "BAHÇE", "TELEFON", "ORMAN", "BALIK", "TARAK"]
-WORD_CHAIN_FOLLOWUPS = ["ARMUT", "TARAK", "KEDİ", "İNCİ", "CİCİ", "ORMAN", "NAR", "RUYA", "ASMA", "AYNA"]
+KELIME_USAGE = "📝 Kelime zinciri oyunu için lütfen şu formatta yazın:\n`/kelime [miktar]`\nÖrnek: `/kelime 100`"
+
+
+def kelime_stop_keyboard(game_key):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 Oyunu Sonlandır", callback_data=f"kelimestop_{game_key}")]])
 
 
 async def kelime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, KELIME_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "📝 Kelime zinciri oyunu için lütfen şu formatta yazın:\n`/kelime [miktar]`\n"
-            "Örnek: `/kelime 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
-    key = f"kz_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "bet": bet}
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"kelimesetup_{game_key}"] = {"user_id": user.id, "bet": bet}
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("▶️ Başla", callback_data=f"kzstart_{key}")]]
-    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Başla", callback_data=f"kelimestart_{game_key}")]])
     text = (
         "📝 Kelime Zinciri Başlıyor!\n"
         "📖 Kural: Bot bir kelime verir, sen son harfiyle yeni bir kelime yazarsın. "
         "Sonra bot senin kelimenin son harfiyle devam eder.\n"
         "⚠️ Önemli: Sadece harflerden oluşan gerçek kelimeler yazmalısın.\n"
-        f"💰 Kazanç: Her doğru kelime için bahsinin 1.3x katını kazanırsın."
+        "💰 Kazanç: Her doğru kelime için bahsinin 1.3x katını kazanırsın."
     )
     await reply(update, text, reply_markup=keyboard)
 
@@ -1861,76 +1711,71 @@ async def kelime_start_callback(update: Update, context: ContextTypes.DEFAULT_TY
     user = query.from_user
     await query.answer()
 
-    key = query.data.replace("kzstart_", "")
-    setup = PENDING_GAMES.get(key)
+    game_key = query.data.replace("kelimestart_", "")
+    setup_key = f"kelimesetup_{game_key}"
+    setup = PENDING_GAMES.get(setup_key)
     if not setup or setup["user_id"] != user.id:
-        await safe_edit(query, "⚠️ Bu oyun artık geçerli değil.")
+        await query.answer("⚠️ Bu oyun sana ait değil veya süresi geçti.", show_alert=True)
         return
 
     bal = get_balance(user.id)
-    bet = setup["bet"]
-    if bal < bet:
-        del PENDING_GAMES[key]
-        await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+    if bal < setup["bet"]:
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
+        del PENDING_GAMES[setup_key]
         return
-    change_balance(user.id, -bet)
-    del PENDING_GAMES[key]
+    change_balance(user.id, -setup["bet"])
+    del PENDING_GAMES[setup_key]
 
     chat_id = update.effective_chat.id
-    seed = random.choice(WORD_CHAIN_SEED_WORDS)
-    WORD_CHAIN_STATE[chat_id] = {
-        "last_word": seed,
-        "used_words": {seed},
+    bot_word = pick_word()
+    TEXT_GAME_STATE[chat_id] = {
+        "type": "kelime",
         "user_id": user.id,
-        "bet": bet,
+        "bet": setup["bet"],
+        "used_words": {bot_word},
+        "last_word": bot_word,
+        "game_key": game_key,
     }
 
-    stop_keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛑 Oyunu Sonlandır", callback_data=f"kzstop_{chat_id}")]]
-    )
-    text = f"🤖 Botun Kelimesi: {seed}\n👉 {seed[-1]} harfi ile bir kelime yaz!"
-    await safe_edit(query, text)
-    await query.message.chat.send_message(text, reply_markup=stop_keyboard)
+    last_letter = bot_word[-1].upper()
+    text = f"🤖 Botun Kelimesi: {bot_word.upper()}\n👉 {last_letter} harfi ile bir kelime yaz!"
+    await safe_edit(query, text, reply_markup=kelime_stop_keyboard(game_key))
 
 
 async def kelime_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
+    await query.answer()
 
-    chat_id_str = query.data.replace("kzstop_", "")
-    chat_id = int(chat_id_str)
-    state = WORD_CHAIN_STATE.get(chat_id)
-
-    if not state or state["user_id"] != user.id:
-        await query.answer("⚠️ Bu oyunda değilsin veya oyun bitti.", show_alert=True)
+    chat_id = update.effective_chat.id
+    state = TEXT_GAME_STATE.get(chat_id)
+    if not state or state["type"] != "kelime" or state["user_id"] != user.id:
+        await query.answer("⚠️ Aktif oyunun yok.", show_alert=True)
         return
 
-    await query.answer()
-    del WORD_CHAIN_STATE[chat_id]
+    del TEXT_GAME_STATE[chat_id]
     await safe_edit(query, "🛑 Kelime zinciri durduruldu.")
 
 
-async def handle_word_chain_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_kelime_message(update: Update, context: ContextTypes.DEFAULT_TYPE, state):
     chat_id = update.effective_chat.id
     user = update.effective_user
-    state = WORD_CHAIN_STATE.get(chat_id)
-
-    if not state or state["user_id"] != user.id:
+    if user.id != state["user_id"]:
         return
 
-    word = update.effective_message.text.strip().upper()
+    word = update.effective_message.text.strip().lower()
     if not word.isalpha():
         return
 
     last_word = state["last_word"]
-    last_letter = last_word[-1]
+    last_letter = normalize(last_word[-1])
+    bet = state["bet"]
 
-    if word[0] != last_letter:
-        bet = state["bet"]
-        del WORD_CHAIN_STATE[chat_id]
+    if normalize(word[0]) != last_letter:
+        del TEXT_GAME_STATE[chat_id]
         await reply(
             update,
-            f"❌ Yanlış harf! Kelime {last_letter} ile başlamalıydı.\n📉 Kayıp: -{fmt(bet)} TL",
+            f"❌ Yanlış harf! Kelime {last_word[-1].upper()} ile başlamalıydı.\n📉 Kayıp: -{fmt(bet)} TL",
         )
         return
 
@@ -1939,92 +1784,91 @@ async def handle_word_chain_message(update: Update, context: ContextTypes.DEFAUL
         return
 
     state["used_words"].add(word)
-    reward = int(state["bet"] * 1.3)
+    reward = int(bet * 0.3)
     new_bal = change_balance(user.id, reward)
 
-    bot_word = random.choice(WORD_CHAIN_FOLLOWUPS)
-    tries = 0
-    while (bot_word[0] != word[-1] or bot_word in state["used_words"]) and tries < 20:
-        bot_word = random.choice(WORD_CHAIN_FOLLOWUPS)
-        tries += 1
-    if bot_word[0] != word[-1]:
-        bot_word = word[-1] + "ARA"  # son care fallback
+    bot_word = find_word_for_letter(word[-1], state["used_words"])
+    if not bot_word:
+        del TEXT_GAME_STATE[chat_id]
+        win_total = int(bet * 1.3)
+        await reply(
+            update,
+            f"✅ Doğru! {word.upper()} yazdın. +{fmt(reward)} TL kazandın.\n"
+            f"Bakiye: {fmt(new_bal)} TL\n\n🏆 Bot başka kelime bulamadı, oyunu kazandın!",
+        )
+        return
 
     state["used_words"].add(bot_word)
     state["last_word"] = bot_word
 
-    stop_keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛑 Oyunu Sonlandır", callback_data=f"kzstop_{chat_id}")]]
-    )
     await reply(
         update,
-        f"✅ Doğru! {word} yazdın. +{fmt(reward)} TL kazandın. Bakiye: {fmt(new_bal)} TL",
+        f"✅ Doğru! {word.upper()} yazdın. +{fmt(reward)} TL kazandın.\nBakiye: {fmt(new_bal)} TL",
     )
-    await update.effective_chat.send_message(
-        f"🤖 Botun Kelimesi: {bot_word}\n👉 {bot_word[-1]} harfi ile bir kelime yaz!",
-        reply_markup=stop_keyboard,
-    )
+    last_letter_disp = bot_word[-1].upper()
+    text = f"🤖 Botun Kelimesi: {bot_word.upper()}\n👉 {last_letter_disp} harfi ile bir kelime yaz!"
+    await reply(update, text, reply_markup=kelime_stop_keyboard(state["game_key"]))
+
 
 # ----------------------------------------------------------------------
 # 10) RUS RULETI
 # ----------------------------------------------------------------------
 
-async def ruleti_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+RULETI_USAGE = "🔫 Rus ruleti oynamak için lütfen şu formatta yazın:\n`/rusruleti [miktar]`\nÖrnek: `/rusruleti 100`"
+
+
+async def rusruleti_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, RULETI_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🔫 Rus ruleti oynamak için lütfen şu formatta yazın:\n`/ruleti [miktar]`\n"
-            "Örnek: `/ruleti 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
     bullet_chamber = random.randint(1, 6)
-    key = f"ruleti_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "bet": bet, "bullet": bullet_chamber}
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"ruleti_{game_key}"] = {"user_id": user.id, "bet": bet, "bullet": bullet_chamber}
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(f"🔘 Oda {i}", callback_data=f"rul_{key}_{i}") for i in range(1, 4)],
-            [InlineKeyboardButton(f"🔘 Oda {i}", callback_data=f"rul_{key}_{i}") for i in range(4, 7)],
-        ]
-    )
-    await reply(update, "🔫 Rus Ruleti! 6 odadan birinde mermi var. Bir oda seç:", reply_markup=keyboard)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🔘 Oda {i}", callback_data=f"ruletipick_{game_key}_{i}") for i in range(1, 4)],
+        [InlineKeyboardButton(f"🔘 Oda {i}", callback_data=f"ruletipick_{game_key}_{i}") for i in range(4, 7)],
+    ])
+    await reply(update, f"🔫 Rus Ruleti! 6 odadan birinde mermi var.\n💰 Bahis: {fmt(bet)} TL\nBir oda seç:", reply_markup=keyboard)
 
 
-async def ruleti_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def rusruleti_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-
-    _, key, picked_str = query.data.split("_", 2)
-    game = PENDING_GAMES.get(key)
-    if not game or game["user_id"] != user.id:
-        await query.answer("⚠️ Bu oyun artık geçerli değil.", show_alert=True)
-        return
-
     await query.answer()
-    picked = int(picked_str)
-    bullet = game["bullet"]
-    bet = game["bet"]
+
+    parts = query.data.split("_")
+    picked = int(parts[-1])
+    game_key = "_".join(parts[1:-1])
+    state_key = f"ruleti_{game_key}"
+    game = PENDING_GAMES.get(state_key)
+
+    if not game:
+        await query.answer("⚠️ Oyun bulunamadı veya bitti.", show_alert=True)
+        return
+    if user.id != game["user_id"]:
+        await query.answer("Bu senin oyunun değil!", show_alert=True)
+        return
 
     bal = get_balance(user.id)
+    bet = game["bet"]
     if bal < bet:
-        del PENDING_GAMES[key]
-        await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
+        del PENDING_GAMES[state_key]
         return
-
     change_balance(user.id, -bet)
-    del PENDING_GAMES[key]
+    del PENDING_GAMES[state_key]
 
+    bullet = game["bullet"]
     if picked == bullet:
         new_bal = get_balance(user.id)
         text = f"🔫 BANG! 💥 Oda {bullet} doluydu!\n😢 Kaybettin! -{fmt(bet)} TL\n💳 Bakiye: {fmt(new_bal)} TL"
@@ -2040,65 +1884,68 @@ async def ruleti_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 11) AT YARISI
 # ----------------------------------------------------------------------
 
+ATYARISI_USAGE = "🐎 At yarışı oynamak için lütfen şu formatta yazın:\n`/atyarisi [miktar]`\nÖrnek: `/atyarisi 100`"
 HORSES = ["🐎 Yıldırım", "🐎 Kartal", "🐎 Fırtına", "🐎 Şimşek", "🐎 Rüzgar"]
 
 
 async def atyarisi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.first_name or "Oyuncu", user.username or "")
-    bet = parse_bet_strict(context.args)
 
+    bet = await require_amount(update, context.args, ATYARISI_USAGE)
     if bet is None:
-        await reply(
-            update,
-            "🐎 At yarışı oynamak için lütfen şu formatta yazın:\n`/atyarisi [miktar]`\n"
-            "Örnek: `/atyarisi 100`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
         return
 
     bal = get_balance(user.id)
     if bal < bet:
-        await reply(update, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await reply(update, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
         return
 
     winner = random.randint(0, len(HORSES) - 1)
-    key = f"at_{user.id}_{int(time.time())}"
-    PENDING_GAMES[key] = {"user_id": user.id, "bet": bet, "winner": winner}
+    game_key = f"{user.id}_{int(time.time()*1000)}"
+    PENDING_GAMES[f"atyar_{game_key}"] = {"user_id": user.id, "bet": bet, "winner": winner}
 
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(h, callback_data=f"aty_{key}_{i}")] for i, h in enumerate(HORSES)]
+        [[InlineKeyboardButton(h, callback_data=f"atyarpick_{game_key}_{i}")] for i, h in enumerate(HORSES)]
     )
-    await reply(update, "🐎 At Yarışı başlıyor! Bahis yapacağın atı seç:", reply_markup=keyboard)
+    await reply(update, f"🐎 At Yarışı başlıyor!\n💰 Bahis: {fmt(bet)} TL\nBahis yapacağın atı seç:", reply_markup=keyboard)
 
 
-async def atyarisi_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def atyarisi_pick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = query.from_user
-
-    _, key, picked_str = query.data.split("_", 2)
-    game = PENDING_GAMES.get(key)
-    if not game or game["user_id"] != user.id:
-        await query.answer("⚠️ Bu oyun artık geçerli değil.", show_alert=True)
-        return
-
     await query.answer()
-    picked = int(picked_str)
-    winner = game["winner"]
-    bet = game["bet"]
+
+    parts = query.data.split("_")
+    picked = int(parts[-1])
+    game_key = "_".join(parts[1:-1])
+    state_key = f"atyar_{game_key}"
+    game = PENDING_GAMES.get(state_key)
+
+    if not game:
+        await query.answer("⚠️ Oyun bulunamadı veya bitti.", show_alert=True)
+        return
+    if user.id != game["user_id"]:
+        await query.answer("Bu senin oyunun değil!", show_alert=True)
+        return
 
     bal = get_balance(user.id)
+    bet = game["bet"]
     if bal < bet:
-        del PENDING_GAMES[key]
-        await safe_edit(query, f"❌ Bakiyən kifayət etmir! 💳 Bakiyən: {fmt(bal)} TL")
+        await safe_edit(query, f"❌ Bakiyen yetersiz! 💳 Bakiyen: {fmt(bal)} TL")
+        del PENDING_GAMES[state_key]
         return
-
     change_balance(user.id, -bet)
-    del PENDING_GAMES[key]
+    del PENDING_GAMES[state_key]
+
+    winner = game["winner"]
+    await safe_edit(query, "🐎 Atlar koşuyor... 🏁")
+    await asyncio.sleep(1.5)
 
     order = list(range(len(HORSES)))
     random.shuffle(order)
-    order.remove(winner)
+    if winner in order:
+        order.remove(winner)
     order.insert(0, winner)
     race_text = "🏁 Yarış sırası:\n" + "\n".join(f"{pos+1}. {HORSES[idx]}" for pos, idx in enumerate(order))
 
@@ -2115,7 +1962,6 @@ async def atyarisi_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------------------------------------------------------------
 # GENEL TEXT MESAJ YONLENDIRICI
-# (sayi tahmin, kelime zinciri, bulmaca ucun)
 # ----------------------------------------------------------------------
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2125,16 +1971,19 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     chat_id = update.effective_chat.id
+    state = TEXT_GAME_STATE.get(chat_id)
+    if not state:
+        return
 
-    if chat_id in GUESS_NUMBER_STATE:
-        await handle_number_guess_message(update, context)
-        return
-    if chat_id in HANGMAN_STATE:
-        await handle_hangman_message(update, context)
-        return
-    if chat_id in WORD_CHAIN_STATE:
-        await handle_word_chain_message(update, context)
-        return
+    game_type = state["type"]
+    if game_type == "bayrak":
+        await handle_bayrak_message(update, context, state)
+    elif game_type == "tahmin":
+        await handle_tahmin_message(update, context, state)
+    elif game_type == "bulmaca":
+        await handle_bulmaca_message(update, context, state)
+    elif game_type == "kelime":
+        await handle_kelime_message(update, context, state)
 
 
 # ----------------------------------------------------------------------
@@ -2144,14 +1993,12 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not BOT_TOKEN:
         raise SystemExit(
-            "❌ BOT_TOKEN tapilmadi! Once: export BOT_TOKEN='token_in' (Linux/Mac) "
-            "veya set BOT_TOKEN=token_in (Windows) komutu ile token-i ekle."
+            "❌ BOT_TOKEN bulunamadı! export BOT_TOKEN='token_in' komutu ile token'i ekle."
         )
-
     if not DATABASE_URL:
         raise SystemExit(
-            "❌ DATABASE_URL tapilmadi! Railway-de PostgreSQL servisi elave et "
-            "(avtomatik DATABASE_URL yaranir) ya da export DATABASE_URL='postgresql://...' ver."
+            "❌ DATABASE_URL bulunamadı! Railway'de PostgreSQL servisi ekle "
+            "(otomatik DATABASE_URL oluşur) ya da export DATABASE_URL='postgresql://...' ver."
         )
 
     init_db()
@@ -2176,39 +2023,48 @@ def main():
     app.add_handler(CommandHandler("tahminet", tahminet_cmd))
     app.add_handler(CommandHandler("bulmaca", bulmaca_cmd))
     app.add_handler(CommandHandler("kelime", kelime_cmd))
-    app.add_handler(CommandHandler("ruleti", ruleti_cmd))
+    app.add_handler(CommandHandler("rusruleti", rusruleti_cmd))
     app.add_handler(CommandHandler("atyarisi", atyarisi_cmd))
 
-    # Callback (inline buton) handlerlar
-    app.add_handler(CallbackQueryHandler(odul_panel_callback, pattern=r"^odul_panel$"))
+    # Menu / profil / zenginler / transfer callback-leri
     app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^info_"))
+    app.add_handler(CallbackQueryHandler(profil_odul_callback, pattern=r"^profil_odul$"))
 
-    app.add_handler(CallbackQueryHandler(bayrak_callback, pattern=r"^bayrak_pick_"))
+    # Slot (animasiya daxilen islenir, ayrica callback yoxdur)
 
-    app.add_handler(CallbackQueryHandler(tkm_rounds_callback, pattern=r"^tkm_rounds_"))
-    app.add_handler(CallbackQueryHandler(tkm_mode_callback, pattern=r"^tkm_mode_"))
-    app.add_handler(CallbackQueryHandler(tkm_bot_move_callback, pattern=r"^tkmb_"))
+    # Bayrak (mesaj-bazli, callback yoxdur)
+
+    # TKM
+    app.add_handler(CallbackQueryHandler(tkm_rounds_callback, pattern=r"^tkmrounds_"))
+    app.add_handler(CallbackQueryHandler(tkm_mode_callback, pattern=r"^tkmmode_"))
     app.add_handler(CallbackQueryHandler(tkm_join_callback, pattern=r"^tkmjoin_"))
-    app.add_handler(CallbackQueryHandler(tkm_duel_move_callback, pattern=r"^tkmd_"))
+    app.add_handler(CallbackQueryHandler(tkm_pick_callback, pattern=r"^tkmpick_|^tkmmpick_"))
 
-    app.add_handler(CallbackQueryHandler(ytsans_callback, pattern=r"^yt_pick_"))
+    # Yazi Tura
+    app.add_handler(CallbackQueryHandler(yt_pick_callback, pattern=r"^yt_"))
 
-    app.add_handler(CallbackQueryHandler(bulbeni_callback, pattern=r"^bb_pick_"))
-    app.add_handler(CallbackQueryHandler(bulbeni_noop_callback, pattern=r"^bb_done$"))
+    # Kutu
+    app.add_handler(CallbackQueryHandler(kutu_pick_callback, pattern=r"^kutu_"))
 
-    app.add_handler(CallbackQueryHandler(xox_join_callback, pattern=r"^xoxjoin_"))
+    # XOX
     app.add_handler(CallbackQueryHandler(xox_cancel_callback, pattern=r"^xoxcancel_"))
+    app.add_handler(CallbackQueryHandler(xox_join_callback, pattern=r"^xoxjoin_"))
     app.add_handler(CallbackQueryHandler(xox_move_callback, pattern=r"^xoxmv_"))
 
-    app.add_handler(CallbackQueryHandler(bulmaca_diff_callback, pattern=r"^hmdiff_"))
+    # Bulmaca
+    app.add_handler(CallbackQueryHandler(bulmaca_diff_callback, pattern=r"^bulmacadiff_"))
 
-    app.add_handler(CallbackQueryHandler(kelime_start_callback, pattern=r"^kzstart_"))
-    app.add_handler(CallbackQueryHandler(kelime_stop_callback, pattern=r"^kzstop_"))
+    # Kelime
+    app.add_handler(CallbackQueryHandler(kelime_start_callback, pattern=r"^kelimestart_"))
+    app.add_handler(CallbackQueryHandler(kelime_stop_callback, pattern=r"^kelimestop_"))
 
-    app.add_handler(CallbackQueryHandler(ruleti_callback, pattern=r"^rul_"))
-    app.add_handler(CallbackQueryHandler(atyarisi_callback, pattern=r"^aty_"))
+    # Rus Ruleti
+    app.add_handler(CallbackQueryHandler(rusruleti_pick_callback, pattern=r"^ruletipick_"))
 
-    # Sade text mesajlari (sayi tahmin / kelime zinciri / bulmaca ucun)
+    # At Yarisi
+    app.add_handler(CallbackQueryHandler(atyarisi_pick_callback, pattern=r"^atyarpick_"))
+
+    # Sade text mesajlari (bayrak / sayi tahmin / bulmaca / kelime zinciri ucun)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     logger.info("Bot başladı...")
